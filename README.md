@@ -52,6 +52,13 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 - `artifacts/flows/<test_id>.yaml`: Generated Maestro flows.
 - `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
 
+## Automation workflow
+
+1. The agent performs a naive transformation from each Qase case into a Maestro flow.
+2. It executes the flow immediately via Maestro CLI.
+3. On any failure it captures a screenshot (and logs stdout/stderr) to inspect the current UI state before making adjustments or flagging the case.
+4. Up to 10 attempts are made per case; unresolved items are surfaced as problematic with pointers to the collected artifacts.
+
 ## Project structure
 ```
 qa-automator/

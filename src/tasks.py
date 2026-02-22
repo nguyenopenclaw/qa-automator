@@ -26,11 +26,12 @@ def parse_inputs_task(agent, test_cases_path: str, tested_info_path: str) -> Tas
 
 def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: int) -> Task:
     description = f"""
-    Iterate through the prioritized backlog and, for each pending case, synthesize a Maestro
-    flow, run it against `{app_path}`, and capture artifacts under `{artifacts_dir}`.
-    Respect the attempt limit of {max_attempts} tries per test. For each attempt log inputs,
-    Maestro stdout/stderr, and whether a screenshot was requested. Mark unresolved cases as
-    problematic.
+    Iterate through the prioritized backlog and, for each pending case, synthesize a naive
+    Maestro flow, run it against `{app_path}`, and capture artifacts under `{artifacts_dir}`.
+    Always grab a screenshot whenever a run fails so you can inspect the UI state before the
+    next iteration. Respect the attempt limit of {max_attempts} tries per test. For each attempt
+    log inputs, Maestro stdout/stderr, and whether additional screenshots were requested. Mark
+    unresolved cases as problematic.
     """
 
     expected_output = (

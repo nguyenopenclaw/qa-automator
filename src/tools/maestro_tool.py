@@ -76,6 +76,11 @@ class MaestroAutomationTool:
                 artifacts.append(shot)
 
         status = "passed" if result.returncode == 0 else "failed"
+        if status == "failed" and not request_screenshot:
+            shot = self._capture_screenshot(test_id, attempt)
+            if shot:
+                artifacts.append(shot)
+
         return {
             "test_id": test_id,
             "status": status,
