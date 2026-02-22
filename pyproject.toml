@@ -1,0 +1,30 @@
+[project]
+name = "qa-automator"
+version = "0.1.0"
+description = "CrewAI-powered Qase → Maestro automation orchestrator"
+authors = ["TODO: FILL_ME"]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "crewai>=0.30.0",
+  "crewai-tools>=0.1.0",
+  "python-dotenv>=1.0",
+  "typer>=0.12",
+  "pydantic>=2.7",
+  "rich>=13.7"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100

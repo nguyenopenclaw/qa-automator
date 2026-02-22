@@ -1,0 +1,11 @@
+{
+  "name": "qa-automator",
+  "goal": "Automate Qase-authored mobile test cases through Maestro CLI with capped retries",
+  "inputs": [
+    "test_cases_json",
+    "tested_info_json",
+    "app_binary_path"
+  ],
+  "integrations": ["maestro", "qase"],
+  "visibility": "public"
+}

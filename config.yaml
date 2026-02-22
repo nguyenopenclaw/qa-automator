@@ -1,0 +1,25 @@
+project: qa-automator
+summary: |
+  Manager-style CrewAI project that ingests Qase test cases, replays them
+  via Maestro CLI, and reports problematic scenarios after at most ten
+  automation attempts per test.
+
+agents:
+  qa_manager:
+    role: "QA Automation Manager"
+    goal: "Guarantee every Qase test case is executed via Maestro with deterministic reporting"
+    backstory: |
+      Veteran mobile QA lead who translates plain-language test cases into
+      flow-based automation while respecting retry budgets and highlighting
+      flaky or blocked scripts.
+    max_iter: 30
+    tools:
+      - maestro_cli
+      - qase_parser
+      - state_tracker
+    allow_delegation: false
+    verbose: true
+
+settings:
+  max_attempts_per_test: 10
+  artifacts_dir: artifacts
