@@ -13,6 +13,7 @@ Automate mobile test cases defined in Qase by orchestrating [Maestro CLI](https:
 - [Maestro CLI](https://maestro.mobile.dev/) installed and accessible via `$MAESTRO_BIN`.
 - Android emulator or device connected (set `MAESTRO_DEVICE` when multiple targets exist).
 - Qase export of test cases in JSON format.
+- (Optional) Deep-link that bypasses onboarding, provided via `APP_SKIP_ONBOARDING_DEEPLINK`.
 
 ## Quick start
 ```bash
@@ -39,6 +40,12 @@ PYTHONPATH=src python src/main.py \
 | `--tested` | JSON file describing already automated / executed cases. |
 | `--app` | Path to the mobile application file (APK/IPA) under test. |
 | `--output` | (Optional) Directory for logs and results. Defaults to `./artifacts`. |
+| `--max-attempts` | Attempts per test before marking as problematic (default 10). |
+
+
+### Onboarding awareness
+
+Qase cases that include the tag **`onboarding`** (case-insensitive) are treated as onboarding\nflows. Every other case is preceded by a Maestro `open --url <DEEPLINK>` call using\n`APP_SKIP_ONBOARDING_DEEPLINK` so automation starts past onboarding screens. If a test\nstill needs onboarding but lacks the tag, add it in Qase or adjust `qase_parser` logic.
 
 ## Output
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.

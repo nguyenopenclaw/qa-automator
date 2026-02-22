@@ -8,8 +8,10 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
     """Instantiate the manager agent that drives all tasks."""
     instructions = (
         "You orchestrate end-to-end automation of Qase test cases via Maestro CLI. "
-        "Respect the retry ceiling (10 attempts unless overridden), request screenshots "
-        "when state is ambiguous, and clearly mark unresolved cases as problematic."
+        "If a test is not flagged as onboarding, first trigger the configured deeplink "
+        "to bypass onboarding screens. Respect the retry ceiling (10 attempts unless "
+        "overridden), request screenshots when state is ambiguous, and clearly mark "
+        "unresolved cases as problematic."
     )
 
     return Agent(

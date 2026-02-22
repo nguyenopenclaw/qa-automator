@@ -37,6 +37,14 @@ class QaseTestParserTool:
         for item in raw:
             case_id = str(item.get("id") or item.get("case_id") or item.get("public_id"))
             steps = item.get("steps") or []
+            tags = item.get("tags") or []
+            tag_strings = []
+            for tag in tags:
+                if isinstance(tag, str):
+                    tag_strings.append(tag.lower())
+                elif isinstance(tag, dict) and tag.get("title"):
+                    tag_strings.append(str(tag["title"]).lower())
+            is_onboarding = "onboarding" in tag_strings or "onboarding" in (item.get("title", "").lower())
             cases.append(
                 {
                     "id": case_id,
@@ -45,6 +53,8 @@ class QaseTestParserTool:
                     "preconditions": item.get("preconditions", ""),
                     "postconditions": item.get("postconditions", ""),
                     "steps": steps,
+                    "tags": tag_strings,
+                    "is_onboarding": is_onboarding,
                 }
             )
         return cases

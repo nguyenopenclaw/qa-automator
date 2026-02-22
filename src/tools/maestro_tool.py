@@ -23,11 +23,13 @@ class MaestroAutomationTool:
         artifacts_dir: Path,
         maestro_bin: str | None = None,
         device: str | None = None,
+        skip_onboarding_deeplink: str | None = None,
     ) -> None:
         self.app_path = Path(app_path)
         self.artifacts_dir = Path(artifacts_dir)
         self.maestro_bin = maestro_bin or "maestro"
         self.device = device
+        self.skip_onboarding_deeplink = skip_onboarding_deeplink
 
     def __call__(self, payload: str | Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(payload, str):
@@ -35,7 +37,9 @@ class MaestroAutomationTool:
         test_case = payload.get("test_case", {})
         attempt = payload.get("attempt", 1)
         request_screenshot = payload.get("screenshot", False)
-        return self.run_test_case(test_case, attempt, request_screenshot)
+        return self.run_test_case(
+            test_case, attempt, request_screenshot, payload.get("is_onboarding")
+        )
 
     # Core execution ---------------------------------------------------
     def run_test_case(
@@ -43,8 +47,11 @@ class MaestroAutomationTool:
         test_case: Dict[str, Any],
         attempt: int,
         request_screenshot: bool = False,
+        is_onboarding: bool | None = None,
     ) -> Dict[str, Any]:
         test_id = test_case.get("id", f"anon-{attempt}")
+        if not is_onboarding:
+            self._skip_onboarding_if_possible(test_id)
         flow_path = self._write_flow(test_case)
         cmd = [self.maestro_bin, "test", str(flow_path), "-a", str(self.app_path)]
         if self.device:
@@ -106,3 +113,21 @@ class MaestroAutomationTool:
             return str(shot_path)
         except subprocess.CalledProcessError:
             return None
+
+def _skip_onboarding_if_possible(self, test_id: str) -> None:
+        if not self.skip_onboarding_deeplink:
+            return
+        cmd = [self.maestro_bin, "open", "--url", self.skip_onboarding_deeplink]
+        if self.device:
+            cmd.extend(["-d", self.device])
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            log_dir = self.artifacts_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            payload = getattr(exc, "stdout", None)
+            body = payload.decode() if isinstance(payload, bytes) else str(payload)
+            (log_dir / f"{test_id}-skip-onboarding.log").write_text(
+                body or "failed to trigger deeplink",
+                encoding="utf-8",
+            )

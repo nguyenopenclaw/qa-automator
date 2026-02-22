@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -36,7 +37,13 @@ def run(
     _ensure_dir(output / "flows")
     _ensure_dir(output / "screenshots")
 
-    maestro_tool = MaestroAutomationTool(app_path=app_path, artifacts_dir=output)
+    maestro_tool = MaestroAutomationTool(
+        app_path=app_path,
+        artifacts_dir=output,
+        maestro_bin=os.getenv("MAESTRO_BIN"),
+        device=os.getenv("MAESTRO_DEVICE"),
+        skip_onboarding_deeplink=os.getenv("APP_SKIP_ONBOARDING_DEEPLINK"),
+    )
     qase_tool = QaseTestParserTool(test_cases=test_cases, tested_cases=tested)
     state_tool = AutomationStateTrackerTool(artifacts_dir=output)
 
