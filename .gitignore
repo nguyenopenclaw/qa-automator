@@ -9,3 +9,5 @@ venv/
 .DS_Store
 reports/
 artifacts/
+
+samples/

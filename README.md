@@ -30,7 +30,7 @@ cp .env.example .env
 PYTHONPATH=src python src/main.py \
   --test-cases ./samples/testcases.json \
   --tested ./samples/tested.json \
-  --app ./apps/MyApp.apk
+  --app-path ./apps/MyApp.apk
 ```
 
 ## Inputs
@@ -38,9 +38,19 @@ PYTHONPATH=src python src/main.py \
 | --- | --- |
 | `--test-cases` | Path to JSON exported from Qase containing test steps. |
 | `--tested` | JSON file describing already automated / executed cases. |
-| `--app` | Path to the mobile application file (APK/IPA) under test. |
+| `--app-path` | Path to the mobile application file (APK/IPA) under test. |
 | `--output` | (Optional) Directory for logs and results. Defaults to `./artifacts`. |
 | `--max-attempts` | Attempts per test before marking as problematic (default 10). |
+
+### Where to set `scenarios.json` path
+
+You do **not** pass a separate CLI argument for `scenarios.json`.
+
+The file is generated automatically by `qase_parser` as:
+- `<directory of --test-cases>/scenarios.json`
+
+Example:
+- if `--test-cases ./samples/testcases.json`, then scenarios are saved to `./samples/scenarios.json`.
 
 
 ### Onboarding awareness
@@ -51,6 +61,7 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.
 - `artifacts/flows/<test_id>.yaml`: Generated Maestro flows.
 - `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
+- `<test-cases-dir>/scenarios.json`: Auto-generated end-to-end scenarios grouped from Qase cases.
 
 ## Automation workflow
 

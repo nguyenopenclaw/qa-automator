@@ -30,21 +30,26 @@ def run(
     tested: Path = typer.Option(..., exists=True, help="JSON list of already automated cases"),
     app_path: Path = typer.Option(..., exists=True, help="Path to APK/IPA under test"),
     output: Path = typer.Option(Path("artifacts"), help="Directory for artifacts"),
+    automated_dir: Path = typer.Option(
+        Path("samples/automated"),
+        help="Directory where generated Maestro tests (.yaml) are stored",
+    ),
     max_attempts: int = typer.Option(10, min=1, max=10, help="Attempts per test"),
 ):
     """Execute the crew end-to-end."""
     _ensure_dir(output)
-    _ensure_dir(output / "flows")
     _ensure_dir(output / "screenshots")
+    _ensure_dir(automated_dir)
 
     maestro_tool = MaestroAutomationTool(
         app_path=app_path,
         artifacts_dir=output,
+        generated_flows_dir=automated_dir,
         maestro_bin=os.getenv("MAESTRO_BIN"),
         device=os.getenv("MAESTRO_DEVICE"),
         skip_onboarding_deeplink=os.getenv("APP_SKIP_ONBOARDING_DEEPLINK"),
     )
-    qase_tool = QaseTestParserTool(test_cases=test_cases, tested_cases=tested)
+    qase_tool = QaseTestParserTool(test_cases_path=test_cases, tested_cases_path=tested)
     state_tool = AutomationStateTrackerTool(artifacts_dir=output)
 
     manager = qa_manager_agent(maestro_tool, qase_tool, state_tool)

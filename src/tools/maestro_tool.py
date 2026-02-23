@@ -3,43 +3,50 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from crewai.tools import BaseTool
+from pydantic import BaseModel, Field
 
-class MaestroAutomationTool:
+
+class MaestroToolInput(BaseModel):
+    """Supported inputs for maestro_cli tool calls."""
+
+    payload: str = Field(
+        default="{}",
+        description="JSON payload with fields: test_case, attempt, screenshot, is_onboarding.",
+    )
+
+
+class MaestroAutomationTool(BaseTool):
     """Generates Maestro flows and executes them for a single test case."""
 
-    name = "maestro_cli"
-    description = (
+    name: str = "maestro_cli"
+    description: str = (
         "Generate temporary Maestro flows for the provided test case payload, "
         "execute them against the supplied app binary, and capture screenshots/logs."
     )
+    args_schema: type[BaseModel] = MaestroToolInput
 
-    def __init__(
+    app_path: Path
+    artifacts_dir: Path
+    generated_flows_dir: Path = Path("samples/automated")
+    maestro_bin: str = "maestro"
+    device: str | None = None
+    skip_onboarding_deeplink: str | None = None
+    command_timeout_seconds: int = 120
+
+    def _run(
         self,
-        app_path: Path,
-        artifacts_dir: Path,
-        maestro_bin: str | None = None,
-        device: str | None = None,
-        skip_onboarding_deeplink: str | None = None,
-    ) -> None:
-        self.app_path = Path(app_path)
-        self.artifacts_dir = Path(artifacts_dir)
-        self.maestro_bin = maestro_bin or "maestro"
-        self.device = device
-        self.skip_onboarding_deeplink = skip_onboarding_deeplink
-
-    def __call__(self, payload: str | Dict[str, Any]) -> Dict[str, Any]:
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-        test_case = payload.get("test_case", {})
-        attempt = payload.get("attempt", 1)
-        request_screenshot = payload.get("screenshot", False)
-        return self.run_test_case(
-            test_case, attempt, request_screenshot, payload.get("is_onboarding")
-        )
+        payload: str = "{}",
+    ) -> Dict[str, Any]:
+        resolved_payload: Dict[str, Any] = json.loads(payload) if payload else {}
+        test_case = resolved_payload.get("test_case", {})
+        attempt = int(resolved_payload.get("attempt", 1))
+        screenshot = bool(resolved_payload.get("screenshot", False))
+        is_onboarding = resolved_payload.get("is_onboarding")
+        return self.run_test_case(test_case, attempt, screenshot, is_onboarding)
 
     # Core execution ---------------------------------------------------
     def run_test_case(
@@ -61,13 +68,39 @@ class MaestroAutomationTool:
         log_path.mkdir(parents=True, exist_ok=True)
         log_file = log_path / f"{test_id}-attempt-{attempt}.log"
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        log_file.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.command_timeout_seconds,
+            )
+            log_file.write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
+        except FileNotFoundError:
+            log_file.write_text(
+                f"maestro binary not found: {self.maestro_bin}",
+                encoding="utf-8",
+            )
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": attempt,
+                "artifacts": [str(log_file)],
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            log_file.write_text(
+                f"maestro command timed out after {self.command_timeout_seconds}s\n{stdout}\n{stderr}",
+                encoding="utf-8",
+            )
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": attempt,
+                "artifacts": [str(log_file)],
+            }
 
         artifacts: List[str] = [str(log_file)]
         if request_screenshot:
@@ -90,7 +123,7 @@ class MaestroAutomationTool:
 
     # Helpers ----------------------------------------------------------
     def _write_flow(self, test_case: Dict[str, Any]) -> Path:
-        flow_dir = self.artifacts_dir / "flows"
+        flow_dir = self.generated_flows_dir
         flow_dir.mkdir(parents=True, exist_ok=True)
         flow_path = flow_dir / f"{test_case.get('id', 'anon')}.yaml"
         steps_yaml = self._steps_to_yaml(test_case.get("steps", []))
@@ -114,20 +147,30 @@ class MaestroAutomationTool:
         if self.device:
             cmd.extend(["-d", self.device])
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                timeout=self.command_timeout_seconds,
+            )
             return str(shot_path)
-        except subprocess.CalledProcessError:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             return None
 
-def _skip_onboarding_if_possible(self, test_id: str) -> None:
+    def _skip_onboarding_if_possible(self, test_id: str) -> None:
         if not self.skip_onboarding_deeplink:
             return
         cmd = [self.maestro_bin, "open", "--url", self.skip_onboarding_deeplink]
         if self.device:
             cmd.extend(["-d", self.device])
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except subprocess.CalledProcessError as exc:
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                timeout=self.command_timeout_seconds,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
             log_dir = self.artifacts_dir / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             payload = getattr(exc, "stdout", None)

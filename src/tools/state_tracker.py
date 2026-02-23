@@ -5,20 +5,52 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+from crewai.tools import BaseTool
+from pydantic import BaseModel, Field, PrivateAttr
 
-class AutomationStateTrackerTool:
-    name = "state_tracker"
-    description = "Persist automation attempts and flag problematic tests."
 
-    def __init__(self, artifacts_dir: Path) -> None:
-        self.artifacts_dir = Path(artifacts_dir)
-        self.report_path = self.artifacts_dir / "automation_report.json"
-        self._state: Dict[str, Any] = {"tests": []}
-        if self.report_path.exists():
-            self._state = json.loads(self.report_path.read_text(encoding="utf-8"))
+class StateTrackerInput(BaseModel):
+    """Supported inputs for state_tracker tool calls."""
 
-    def __call__(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        action = payload.get("action")
+    action: str = Field(description="Action: record_attempt | mark_problematic | summary")
+    test_id: str | None = Field(default=None, description="Test identifier for updates.")
+    attempt: int = Field(default=1, ge=1, description="Attempt count.")
+    status: str = Field(default="failed", description="Current run status.")
+    artifacts: List[str] = Field(default_factory=list, description="Artifact file paths.")
+    reason: str = Field(default="Max attempts exhausted", description="Problem reason.")
+
+
+class AutomationStateTrackerTool(BaseTool):
+    name: str = "state_tracker"
+    description: str = "Persist automation attempts and flag problematic tests."
+    args_schema: type[BaseModel] = StateTrackerInput
+
+    artifacts_dir: Path
+    _report_path: Path = PrivateAttr()
+    _state: Dict[str, Any] = PrivateAttr(default_factory=lambda: {"tests": []})
+
+    def model_post_init(self, __context: Any) -> None:
+        self._report_path = self.artifacts_dir / "automation_report.json"
+        if self._report_path.exists():
+            self._state = json.loads(self._report_path.read_text(encoding="utf-8"))
+
+    def _run(
+        self,
+        action: str,
+        test_id: str | None = None,
+        attempt: int = 1,
+        status: str = "failed",
+        artifacts: List[str] | None = None,
+        reason: str = "Max attempts exhausted",
+    ) -> Dict[str, Any]:
+        payload = {
+            "action": action,
+            "test_id": test_id,
+            "attempt": attempt,
+            "status": status,
+            "artifacts": artifacts or [],
+            "reason": reason,
+        }
         if action == "record_attempt":
             return self.record_attempt(payload)
         if action == "mark_problematic":
@@ -61,4 +93,4 @@ class AutomationStateTrackerTool:
         return entry
 
     def _write(self) -> None:
-        self.report_path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
+        self._report_path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
