@@ -24,7 +24,11 @@ pip install -e .
 
 # Copy environment template
 cp .env.example .env
-# Fill in Qase project info, Maestro settings, and optional tuning knobs.
+# Fill in Maestro settings and optional tuning knobs.
+# Load variables into the current shell session.
+set -a
+source .env
+set +a
 
 # Run the crew
 PYTHONPATH=src python src/main.py \
@@ -40,7 +44,17 @@ PYTHONPATH=src python src/main.py \
 | `--tested` | JSON file describing already automated / executed cases. |
 | `--app-path` | Path to the mobile application file (APK/IPA) under test. |
 | `--output` | (Optional) Directory for logs and results. Defaults to `./artifacts`. |
+| `--automated-dir` | (Optional) Directory for generated Maestro flows. Defaults to `./samples/automated`. |
 | `--max-attempts` | Attempts per test before marking as problematic (default 10). |
+
+## Environment variables
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `MAESTRO_BIN` | No | `maestro` | Path or command name for Maestro CLI executable. |
+| `MAESTRO_DEVICE` | No | _(empty)_ | Target device ID when multiple emulators/devices are connected. |
+| `MAESTRO_APP_ID` | No | `default` | App ID inserted into generated Maestro YAML flows. |
+| `APP_SKIP_ONBOARDING_DEEPLINK` | No | _(empty)_ | Deep-link opened before non-onboarding tests to skip onboarding. |
+| `MAESTRO_SCREENSHOT_MAX_SIDE_PX` | No | `1440` | Max image side for captured screenshots before attaching to model context. |
 
 ### Where to set `scenarios.json` path
 
@@ -59,8 +73,9 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 
 ## Output
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.
-- `artifacts/flows/<test_id>.yaml`: Generated Maestro flows.
+- `samples/automated/<test_id>.yaml`: Generated Maestro flows (or custom `--automated-dir` path).
 - `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
+- `artifacts/logs/<test_id>-attempt-<n>.log`: Maestro stdout/stderr for each attempt.
 - `<test-cases-dir>/scenarios.json`: Auto-generated end-to-end scenarios grouped from Qase cases.
 
 ## Automation workflow

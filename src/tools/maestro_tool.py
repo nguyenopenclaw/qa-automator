@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import hashlib
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from crewai.tools import BaseTool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class MaestroToolInput(BaseModel):
@@ -37,10 +39,18 @@ class MaestroAutomationTool(BaseTool):
     generated_flows_dir: Path = Path("samples/automated")
     maestro_bin: str = "maestro"
     device: str | None = None
+    app_id: str = "default"
     skip_onboarding_deeplink: str | None = None
+    app_install_tool: str = "maestro"
+    ios_simulator_target: str = "booted"
+    install_app_before_test: bool = True
+    install_app_once: bool = True
+    reinstall_app_per_scenario: bool = True
     command_timeout_seconds: int = 120
     screenshot_max_side_px: int = 1440
     failure_excerpt_max_chars: int = 4000
+    _app_install_done: bool = PrivateAttr(default=False)
+    _last_scenario_id: str | None = PrivateAttr(default=None)
 
     def _run(
         self,
@@ -79,7 +89,8 @@ class MaestroAutomationTool(BaseTool):
         attempt = int(resolved_payload.get("attempt", 1))
         screenshot = bool(resolved_payload.get("screenshot", False))
         is_onboarding = resolved_payload.get("is_onboarding")
-        return self.run_test_case(test_case, attempt, screenshot, is_onboarding)
+        scenario_id = resolved_payload.get("scenario_id")
+        return self.run_test_case(test_case, attempt, screenshot, is_onboarding, scenario_id)
 
     # Core execution ---------------------------------------------------
     def run_test_case(
@@ -88,8 +99,12 @@ class MaestroAutomationTool(BaseTool):
         attempt: int,
         request_screenshot: bool = False,
         is_onboarding: bool | None = None,
+        scenario_id: str | None = None,
     ) -> Dict[str, Any]:
         test_id = test_case.get("id", f"anon-{attempt}")
+        install_failure = self._ensure_app_installed(test_id, scenario_id)
+        if install_failure:
+            return install_failure
         if not is_onboarding:
             self._skip_onboarding_if_possible(test_id)
         flow_path = self._write_flow(test_case)
@@ -176,22 +191,372 @@ class MaestroAutomationTool(BaseTool):
         return response
 
     # Helpers ----------------------------------------------------------
+    def _ensure_app_installed(self, test_id: str, scenario_id: str | None = None) -> Dict[str, Any] | None:
+        if not self.install_app_before_test:
+            return None
+        if self.reinstall_app_per_scenario:
+            boundary_id = (scenario_id or f"test:{test_id}").strip()
+            if boundary_id != self._last_scenario_id:
+                reinstall_failure = self._reinstall_app_for_boundary(test_id, boundary_id)
+                if reinstall_failure:
+                    return reinstall_failure
+                self._last_scenario_id = boundary_id
+                self._app_install_done = True
+            return None
+
+        if self.install_app_once and self._app_install_done:
+            return None
+
+        log_dir = self.artifacts_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_name = "app-install.log" if self.install_app_once else f"{test_id}-app-install.log"
+        log_file = log_dir / log_name
+
+        cmd = self._build_install_cmd()
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.command_timeout_seconds,
+            )
+            output = (result.stdout or "") + ("\n" if result.stdout or result.stderr else "") + (result.stderr or "")
+            log_file.write_text(output, encoding="utf-8")
+            if result.returncode != 0:
+                return {
+                    "test_id": test_id,
+                    "status": "failed",
+                    "attempt": 1,
+                    "artifacts": [str(log_file)],
+                    "error": "app_install_failed",
+                    "failure_context": {
+                        "cause": "app_install_failed",
+                        "recommendation": (
+                            f"Verify installer backend '{self._normalized_install_tool()}', app_path, "
+                            "and connected simulator/device."
+                        ),
+                        "log_excerpt": self._trim_excerpt(output),
+                        "log_path": str(log_file),
+                    },
+                }
+        except FileNotFoundError:
+            log_file.write_text(
+                f"install backend executable not found for tool '{self._normalized_install_tool()}'",
+                encoding="utf-8",
+            )
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": 1,
+                "artifacts": [str(log_file)],
+                "error": "install_backend_not_found",
+                "failure_context": {
+                    "cause": "install_backend_not_found",
+                    "recommendation": (
+                        "Install required CLI (xcrun/maestro) or adjust MAESTRO_APP_INSTALL_TOOL."
+                    ),
+                    "log_excerpt": log_file.read_text(encoding="utf-8"),
+                    "log_path": str(log_file),
+                },
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            output = f"maestro install timed out after {self.command_timeout_seconds}s\n{stdout}\n{stderr}"
+            log_file.write_text(output, encoding="utf-8")
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": 1,
+                "artifacts": [str(log_file)],
+                "error": "app_install_timeout",
+                "failure_context": {
+                    "cause": "app_install_timeout",
+                    "recommendation": "Ensure simulator/device is booted and app artifact is accessible, then retry.",
+                    "log_excerpt": self._trim_excerpt(output),
+                    "log_path": str(log_file),
+                },
+            }
+
+        self._app_install_done = True
+        return None
+
+    def _reinstall_app_for_boundary(self, test_id: str, boundary_id: str) -> Dict[str, Any] | None:
+        """Clean reinstall app on scenario boundary to reset onboarding state."""
+        log_dir = self.artifacts_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        safe_boundary = re.sub(r"[^a-zA-Z0-9_.-]+", "_", boundary_id)
+        log_file = log_dir / f"{safe_boundary}-app-reinstall.log"
+
+        uninstall_cmd = self._build_uninstall_cmd()
+
+        install_cmd = self._build_install_cmd()
+
+        uninstall_result = None
+        uninstall_output = ""
+        try:
+            uninstall_result = subprocess.run(
+                uninstall_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.command_timeout_seconds,
+            )
+            uninstall_output = (uninstall_result.stdout or "") + "\n" + (uninstall_result.stderr or "")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            uninstall_output = f"uninstall step failed: {exc}"
+
+        try:
+            install_result = subprocess.run(
+                install_cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=self.command_timeout_seconds,
+            )
+        except FileNotFoundError:
+            log_file.write_text(
+                "maestro binary not found during reinstall\n" + uninstall_output,
+                encoding="utf-8",
+            )
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": 1,
+                "artifacts": [str(log_file)],
+                "error": "install_backend_not_found",
+                "failure_context": {
+                    "cause": "install_backend_not_found",
+                    "recommendation": (
+                        "Install required CLI (xcrun/maestro) or adjust MAESTRO_APP_INSTALL_TOOL."
+                    ),
+                    "log_excerpt": self._trim_excerpt(log_file.read_text(encoding="utf-8")),
+                    "log_path": str(log_file),
+                },
+            }
+        except subprocess.TimeoutExpired as exc:
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+            body = (
+                f"install step timed out after {self.command_timeout_seconds}s\n"
+                f"{uninstall_output}\n{stdout}\n{stderr}"
+            )
+            log_file.write_text(body, encoding="utf-8")
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": 1,
+                "artifacts": [str(log_file)],
+                "error": "app_install_timeout",
+                "failure_context": {
+                    "cause": "app_install_timeout",
+                    "recommendation": "Ensure simulator/device is booted and app artifact is accessible, then retry.",
+                    "log_excerpt": self._trim_excerpt(body),
+                    "log_path": str(log_file),
+                },
+            }
+
+        install_output = (install_result.stdout or "") + "\n" + (install_result.stderr or "")
+        body = (
+            f"scenario_boundary={boundary_id}\n"
+            f"uninstall_exit={getattr(uninstall_result, 'returncode', 'n/a')}\n"
+            f"{uninstall_output}\n"
+            f"install_exit={install_result.returncode}\n"
+            f"{install_output}"
+        )
+        log_file.write_text(body, encoding="utf-8")
+        if install_result.returncode != 0:
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": 1,
+                "artifacts": [str(log_file)],
+                "error": "app_install_failed",
+                "failure_context": {
+                    "cause": "app_install_failed",
+                    "recommendation": "Verify app_path and connected simulator/device, then retry scenario.",
+                    "log_excerpt": self._trim_excerpt(body),
+                    "log_path": str(log_file),
+                },
+            }
+        return None
+
+    def _normalized_install_tool(self) -> str:
+        tool = (self.app_install_tool or "maestro").strip().lower()
+        return tool if tool in {"maestro", "xcrun"} else "maestro"
+
+    def _build_install_cmd(self) -> List[str]:
+        tool = self._normalized_install_tool()
+        if tool == "xcrun":
+            target = (self.ios_simulator_target or "booted").strip() or "booted"
+            return ["xcrun", "simctl", "install", target, str(self.app_path)]
+        cmd = [self.maestro_bin]
+        if self.device:
+            cmd.extend(["--device", self.device])
+        cmd.extend(["install", str(self.app_path)])
+        return cmd
+
+    def _build_uninstall_cmd(self) -> List[str]:
+        tool = self._normalized_install_tool()
+        if tool == "xcrun":
+            target = (self.ios_simulator_target or "booted").strip() or "booted"
+            return ["xcrun", "simctl", "uninstall", target, self.app_id]
+        cmd = [self.maestro_bin]
+        if self.device:
+            cmd.extend(["--device", self.device])
+        cmd.extend(["uninstall", self.app_id])
+        return cmd
+
     def _write_flow(self, test_case: Dict[str, Any]) -> Path:
         flow_dir = self.generated_flows_dir
         flow_dir.mkdir(parents=True, exist_ok=True)
         flow_path = flow_dir / f"{test_case.get('id', 'anon')}.yaml"
         steps_yaml = self._steps_to_yaml(test_case.get("steps", []))
-        flow_content = "appId: default\n---\n" + steps_yaml
+        app_id = (self.app_id or "default").strip() or "default"
+        flow_content = f"appId: {app_id}\n---\n" + steps_yaml
         flow_path.write_text(flow_content, encoding="utf-8")
         return flow_path
 
     def _steps_to_yaml(self, steps: List[Dict[str, Any]]) -> str:
-        lines = []
+        lines: List[str] = self._default_launch_app_lines()
         for step in steps:
-            action = step.get("action") or step.get("type") or "tapOn"
-            payload = step.get("payload") or step.get("value") or step.get("text") or ""
-            lines.append(f"- {action}: {json.dumps(payload)}")
-        return "\n".join(lines) if lines else "- launchApp"
+            lines.extend(self._normalize_step_to_commands(step))
+        return "\n".join(lines)
+
+    def _default_launch_app_lines(self) -> List[str]:
+        """Standard app start config aligned with project onboarding flow."""
+        return [
+            "- launchApp:",
+            "    clearState: true",
+            "    clearKeychain: false",
+            "    stopApp: false",
+            "    permissions: { all: deny }",
+        ]
+
+    def _normalize_step_to_commands(self, step: Dict[str, Any]) -> List[str]:
+        """
+        Convert verbose Qase prose into valid Maestro commands.
+
+        Never emit unknown command names; fallback is a safe screenshot marker.
+        """
+        raw_action = str(step.get("action") or step.get("type") or "").strip()
+        raw_payload = step.get("payload") or step.get("value") or step.get("text")
+        expected_result = str(step.get("expected_result") or "").strip()
+        raw_action_lower = raw_action.lower()
+        cmds: List[str] = []
+
+        supported = {
+            "launchApp",
+            "tapOn",
+            "inputText",
+            "scrollUntilVisible",
+            "assertVisible",
+            "assertNotVisible",
+            "waitForAnimationToEnd",
+            "extendedWaitUntil",
+            "takeScreenshot",
+            "runFlow",
+        }
+
+        # If upstream already provided a known Maestro command, keep it.
+        if raw_action in supported:
+            rendered = self._render_command(raw_action, raw_payload)
+            if rendered:
+                cmds.append(rendered)
+            return cmds or [self._render_comment("empty-known-command")]
+
+        # Heuristic mapping from prose -> valid Maestro commands.
+        quoted_bits = self._extract_quoted_text(raw_action)
+        candidate = quoted_bits[0] if quoted_bits else None
+        if not candidate:
+            candidate = self._extract_parenthesized_text(raw_action)
+
+        if any(token in raw_action_lower for token in ("тап", "tap", "нажм", "клик")):
+            target = candidate or self._infer_common_target(raw_action_lower)
+            if target:
+                cmds.append(self._render_command("tapOn", target))
+            else:
+                cmds.append(self._render_comment(f"tap action not mapped: {raw_action}"))
+        elif any(token in raw_action_lower for token in ("введ", "input", "enter", "заполн")):
+            text_value = raw_payload or candidate
+            if text_value:
+                cmds.append(self._render_command("inputText", text_value))
+            else:
+                cmds.append(self._render_comment(f"input action not mapped: {raw_action}"))
+        elif any(token in raw_action_lower for token in ("пролист", "scroll", "swipe", "свайп")):
+            target = candidate or self._first_non_empty_line(expected_result)
+            if target:
+                cmds.append(self._render_command("scrollUntilVisible", target))
+            else:
+                cmds.append("- waitForAnimationToEnd")
+        elif any(token in raw_action_lower for token in ("открыт", "экран", "переход")):
+            # State-like prose usually describes expected screen; make it explicit.
+            if candidate:
+                cmds.append(self._render_command("assertVisible", candidate))
+            else:
+                first_line = self._first_non_empty_line(raw_action)
+                if first_line:
+                    cmds.append(self._render_comment(first_line))
+        else:
+            if raw_action:
+                cmds.append(self._render_comment(raw_action))
+
+        # Promote compact expected_result to assertion when practical.
+        expected_line = self._first_non_empty_line(expected_result)
+        if expected_line and len(expected_line) <= 120:
+            cmds.append(self._render_command("assertVisible", expected_line))
+        elif expected_line:
+            cmds.append(self._render_comment(f"expected: {expected_line[:200]}"))
+
+        if not cmds:
+            cmds.append(self._render_comment("Unmapped step"))
+        return cmds
+
+    def _render_command(self, command: str, payload: Any = None) -> str | None:
+        no_payload_cmds = {"launchApp", "waitForAnimationToEnd"}
+        if command in no_payload_cmds:
+            return f"- {command}"
+        if payload is None or payload == "":
+            return None
+        return f"- {command}: {json.dumps(str(payload), ensure_ascii=False)}"
+
+    def _render_comment(self, text: str) -> str:
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
+        # Some Maestro versions do not support `comment`; use deterministic evidence capture instead.
+        return f"- takeScreenshot: \"note-{digest}\""
+
+    def _extract_quoted_text(self, source: str) -> List[str]:
+        if not source:
+            return []
+        matches = re.findall(r"[\"'«](.+?)[\"'»]", source)
+        return [item.strip() for item in matches if item and item.strip()]
+
+    def _extract_parenthesized_text(self, source: str) -> str | None:
+        if not source:
+            return None
+        match = re.search(r"\(([^)]+)\)", source)
+        if not match:
+            return None
+        text = match.group(1).strip()
+        return text or None
+
+    def _first_non_empty_line(self, source: str) -> str | None:
+        if not source:
+            return None
+        for line in source.splitlines():
+            text = line.strip()
+            if text:
+                return text
+        return None
+
+    def _infer_common_target(self, action_lower: str) -> str | None:
+        if "продолж" in action_lower:
+            return "Continue"
+        if "назад" in action_lower:
+            return "Back"
+        return None
 
     def _build_failure_context(self, stdout: str, stderr: str, log_file: Path) -> Dict[str, str]:
         """Return compact diagnostics so the agent can fix flow on next retry."""
@@ -212,7 +577,8 @@ class MaestroAutomationTool(BaseTool):
             cause = "element_not_found"
             recommendation = (
                 "Update selector text/id to match current screen and use scrollUntilVisible "
-                "before interacting."
+                "before interacting. If testcase text is in another language, trust screenshot "
+                "labels (often English UI) as source of truth for selector names."
             )
         elif "assert" in lower and "failed" in lower:
             cause = "assertion_failed"
