@@ -32,9 +32,11 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
     scenario is queued for automation next. Use qase_parser to fetch the same scenario id so
     you always share context with the QA Manager. For every case in that scenario, call
     `app_flow_memory`'s `suggest_context` to capture best starting screens, confidence, and
-    rationale. When the memory lacks data, derive a hypothesis from test titles and steps,
-    label it as low-confidence, and explicitly request confirmation from the manager after the
-    first automation attempt. Consolidate all findings into `{artifacts_dir}/appflow_plan_<scenario_id>.md`.
+    rationale. Immediately persist each hypothesis via `app_flow_memory` `record_plan` so the
+    memory file reflects that this run attempted to cover the case (even before automation).
+    When the memory lacks data, derive a hypothesis from test titles and steps, label it as
+    low-confidence, and explicitly request confirmation from the manager after the first
+    automation attempt. Consolidate all findings into `{artifacts_dir}/appflow_plan_<scenario_id>.md`.
     The plan must include: scenario summary, recommended navigation order, per-case starting
     context, warnings about known flaky selectors (if any), confidence level, and gaps the
     manager should watch for. Keep it concise, but ensure each case has a checklist the manager

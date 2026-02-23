@@ -14,7 +14,7 @@ class AppFlowInput(BaseModel):
     """Supported inputs for app_flow_memory tool calls."""
 
     action: str = Field(
-        description="Action: suggest_context | record_observation | summary"
+        description="Action: suggest_context | record_plan | record_observation | summary"
     )
     test_id: str | None = Field(default=None, description="Test case identifier.")
     scenario_id: str | None = Field(default=None, description="Scenario identifier.")
@@ -27,6 +27,11 @@ class AppFlowInput(BaseModel):
         default=None,
         description="Known app location/screen where case starts or fails.",
     )
+    recommended_start: str | None = Field(
+        default=None,
+        description="Hypothesized start context derived during planning.",
+    )
+    confidence: str | None = Field(default=None, description="Confidence label for plan.")
     failure_cause: str | None = Field(default=None, description="Failure cause string.")
     notes: str | None = Field(default=None, description="Any extra inference notes.")
 
@@ -36,17 +41,27 @@ class AppFlowMemoryTool(BaseTool):
 
     name: str = "app_flow_memory"
     description: str = (
-        "Persistent memory of app screen flow. Use suggest_context before writing a test "
-        "and record_observation after each attempt to learn where flows start/fail."
+        "Persistent memory of app screen flow. Use suggest_context before writing a test, "
+        "record_plan to capture each hypothesis, and record_observation after attempts so the "
+        "map improves every run."
     )
     args_schema: type[BaseModel] = AppFlowInput
 
     artifacts_dir: Path
     _knowledge_path: Path = PrivateAttr()
+    _memory_dir: Path = PrivateAttr()
+    _checkpoint_dir: Path = PrivateAttr()
     _state: Dict[str, Any] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, __context: Any) -> None:
-        self._knowledge_path = self.artifacts_dir / "app_flow_knowledge.json"
+        self._memory_dir = self.artifacts_dir / "app_flow_memory"
+        self._memory_dir.mkdir(parents=True, exist_ok=True)
+        self._knowledge_path = self._memory_dir / "state.json"
+        self._checkpoint_dir = self._memory_dir / "checkpoints"
+        self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        legacy_path = self.artifacts_dir / "app_flow_knowledge.json"
+        if legacy_path.exists() and not self._knowledge_path.exists():
+            legacy_path.replace(self._knowledge_path)
         if self._knowledge_path.exists():
             try:
                 loaded = json.loads(self._knowledge_path.read_text(encoding="utf-8"))
@@ -76,6 +91,8 @@ class AppFlowMemoryTool(BaseTool):
         location_hint: str | None = None,
         failure_cause: str | None = None,
         notes: str | None = None,
+        recommended_start: str | None = None,
+        confidence: str | None = None,
     ) -> Dict[str, Any]:
         if action == "suggest_context":
             return self._suggest_context(
@@ -84,6 +101,15 @@ class AppFlowMemoryTool(BaseTool):
                 title=title,
                 preconditions=preconditions,
                 steps_text=steps_text,
+            )
+        if action == "record_plan":
+            return self._record_plan(
+                test_id=test_id,
+                scenario_id=scenario_id,
+                title=title,
+                recommended_start=recommended_start or location_hint,
+                confidence=confidence,
+                notes=notes,
             )
         if action == "record_observation":
             return self._record_observation(
@@ -146,6 +172,66 @@ class AppFlowMemoryTool(BaseTool):
             "known_case_observations": len(case_entry.get("observations", [])) if case_entry else 0,
         }
 
+    def _record_plan(
+        self,
+        test_id: str | None,
+        scenario_id: str | None,
+        title: str | None,
+        recommended_start: str | None,
+        confidence: str | None,
+        notes: str | None,
+    ) -> Dict[str, Any]:
+        if not test_id:
+            raise ValueError("record_plan requires test_id")
+        now = datetime.now(timezone.utc).isoformat()
+        case = self._state.setdefault("cases", {}).setdefault(
+            test_id,
+            {
+                "title": title or "",
+                "preferred_start": "",
+                "common_failure_causes": [],
+                "observations": [],
+                "plans": [],
+            },
+        )
+        if "plans" not in case:
+            case["plans"] = []
+        plan_entry = {
+            "time": now,
+            "scenario_id": scenario_id or "",
+            "recommended_start": recommended_start or "unknown",
+            "confidence": (confidence or "low").lower(),
+            "notes": notes or "",
+        }
+        case["plans"].append(plan_entry)
+        case["plans"] = case["plans"][-20:]
+        if title and not case.get("title"):
+            case["title"] = title
+        if recommended_start and not case.get("preferred_start"):
+            case["preferred_start"] = recommended_start
+
+        if scenario_id:
+            scenario = self._state.setdefault("scenario_hints", {}).setdefault(
+                scenario_id,
+                {"preferred_start": "", "last_seen_case_ids": []},
+            )
+            if recommended_start and not scenario.get("preferred_start"):
+                scenario["preferred_start"] = recommended_start
+            ids: List[str] = scenario.setdefault("last_seen_case_ids", [])
+            if test_id not in ids:
+                ids.append(test_id)
+            scenario["last_seen_case_ids"] = ids[-15:]
+
+        self._state["updated_at"] = now
+        self._write()
+        return {
+            "ok": True,
+            "test_id": test_id,
+            "scenario_id": scenario_id,
+            "plans_tracked": len(case.get("plans", [])),
+            "recommended_start": plan_entry["recommended_start"],
+        }
+
     def _record_observation(
         self,
         test_id: str | None,
@@ -167,6 +253,7 @@ class AppFlowMemoryTool(BaseTool):
                 "preferred_start": "",
                 "common_failure_causes": [],
                 "observations": [],
+                "plans": [],
             },
         )
         if title and not case.get("title"):
@@ -223,14 +310,18 @@ class AppFlowMemoryTool(BaseTool):
                     "test_id": case_id,
                     "preferred_start": payload.get("preferred_start", ""),
                     "observations": len(payload.get("observations", [])),
+                    "plans": len(payload.get("plans", [])),
                 }
             )
+        checkpoint_files = sorted(self._checkpoint_dir.glob("*.json"))
         return {
             "updated_at": self._state.get("updated_at", ""),
             "known_cases": len(cases),
             "known_scenarios": len(scenario_hints),
             "top_case_hints": top_case_hints,
             "knowledge_path": str(self._knowledge_path),
+            "checkpoint_count": len(checkpoint_files),
+            "checkpoint_dir": str(self._checkpoint_dir),
         }
 
     def _case_entry(self, test_id: str) -> Dict[str, Any] | None:
@@ -258,7 +349,22 @@ class AppFlowMemoryTool(BaseTool):
         return None
 
     def _write(self) -> None:
-        self._knowledge_path.write_text(
-            json.dumps(self._state, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(self._state, ensure_ascii=False, indent=2)
+        self._knowledge_path.write_text(payload, encoding="utf-8")
+        self._write_checkpoint(payload)
+
+    def _write_checkpoint(self, payload: str) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        checkpoint_path = self._checkpoint_dir / f"state-{timestamp}.json"
+        checkpoint_path.write_text(payload, encoding="utf-8")
+        self._prune_checkpoints()
+
+    def _prune_checkpoints(self, max_count: int = 20) -> None:
+        checkpoints = sorted(self._checkpoint_dir.glob("state-*.json"))
+        if len(checkpoints) <= max_count:
+            return
+        for stale in checkpoints[:-max_count]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass

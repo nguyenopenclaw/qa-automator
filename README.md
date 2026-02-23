@@ -75,6 +75,7 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 ## Output
 - `artifacts/current_scenario.json`: Snapshot of the next scenario all agents must focus on.
 - `artifacts/appflow_plan_<scenario_id>.md`: AppFlow specialist's plan with per-case entry points.
+- `artifacts/app_flow_memory/state.json`: Persistent AppFlow knowledge base (auto-snapshotted per run).
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.
 - `samples/automated/<test_id>.yaml`: Generated Maestro flows (or custom `--automated-dir` path).
 - `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
@@ -84,7 +85,7 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 ## Automation workflow
 
 1. **Parse inputs** – the QA Manager calls `qase_parser` which groups cases into scenarios and writes both `scenarios.json` and `artifacts/current_scenario.json`.
-2. **Plan navigation** – the AppFlow specialist reads the current scenario snapshot, queries `qase_parser`/`app_flow_memory`, and emits `artifacts/appflow_plan_<scenario_id>.md`. When memory is empty it still drafts low-confidence hypotheses from test text so automation can begin gathering evidence.
+2. **Plan navigation** – the AppFlow specialist reads the current scenario snapshot, queries `qase_parser`/`app_flow_memory`, and emits `artifacts/appflow_plan_<scenario_id>.md`. Every hypothesis is persisted via `app_flow_memory.record_plan`, so `artifacts/app_flow_memory/state.json` grows on each run—even when memory starts empty.
 3. **Automate with Maestro** – the QA Manager refuses to proceed until a full plan exists, then converts each case to a Maestro flow, executes it, and logs screenshots + stdout/stderr for each attempt.
 4. **Inspect & retry** – on failures the manager studies `failure_context`, AppFlow notes, and screenshots to iteratively fix the flow (up to 10 attempts).
 5. **Report** – `automation_report.json` and `summary.md` document final status plus artifact pointers for manual QA follow-up.
