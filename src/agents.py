@@ -41,7 +41,7 @@ def qa_manager_agent(qase_parser_tool, state_tracker_tool, appflow_memory_tool) 
 
     return Agent(
         role="QA Automation Manager",
-        goal="Automate every provided Qase test case through Maestro flows",
+        goal="Automate every selected scenario through Maestro flows",
         backstory=(
             "Seasoned QA lead who thinks in execution strategy, scenario dependencies, "
             "and delivery sequencing across large regression sets."
@@ -61,9 +61,9 @@ def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_
     instructions = (
         "You own Maestro YAML implementation and stabilization for the selected scenario.\n\n"
         "Execution protocol (mandatory):\n"
-        "1) Process exactly one scenario per run, but include all its cases.\n"
-        "2) Build one consolidated scenario-level YAML in case order.\n"
-        "3) Before drafting, request per-case start context from AppFlow specialist and merge "
+        "1) Process exactly one scenario per run, including all scenario items.\n"
+        "2) Build one consolidated scenario-level YAML in scenario-item order.\n"
+        "3) Before drafting, request per-item start context from AppFlow specialist and merge "
         "hints into one coherent path.\n"
         "4) Run maestro_cli using `scenario_id` and `flow_scope: \"scenario\"`.\n"
         "5) After each draft/edit iteration, send full YAML to MaestroSenior.\n"
@@ -73,9 +73,14 @@ def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_
         "with: test_id, scenario_id, status, attempt, location_hint, failure_cause.\n\n"
         "Quality rules:\n"
         "- Never resend unchanged YAML after element_not_found/assertion_failed.\n"
+        "- Preserve already successful flow prefix. If failure_context provides "
+        "last_successful_step_index/retry_from_step_index, keep all commands up to "
+        "last_successful_step_index semantically intact and patch only from retry_from_step_index onward.\n"
+        "- AppFlow recovery hints are for fixing navigation from the failure point forward, "
+        "not for replacing already validated steps.\n"
         "- Every flow must contain explicit assertVisible/assertNotVisible checks.\n"
         "- takeScreenshot is debugging evidence only, not pass criteria.\n"
-        "- If testcase wording differs from app UI language, trust screenshot and "
+        "- If parsed step wording differs from app UI language, trust screenshot and "
         "ui_text_candidates as source of truth for selectors.\n"
         "- If not onboarding, use configured deeplink path to skip onboarding first.\n\n"
         "Collaboration rules:\n"
@@ -122,7 +127,7 @@ def maestro_senior_agent() -> Agent:
             "fences, no prose).\n"
             "Fix: invalid YAML structure, prose instead of commands, missing synchronization before "
             "interactions/assertions, weak selectors, and missing explicit outcome assertions. "
-            "Keep edits compact and deterministic while preserving testcase intent. "
+            "Keep edits compact and deterministic while preserving scenario intent. "
             "Treat `repeat` loops with `times > 3` as invalid and rewrite/remove them so max in-flow "
             "retries is 3. If failure_context is provided, prioritize selector/timing corrections "
             "that directly address the latest failure."
@@ -134,7 +139,7 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
     """Instantiate AppFlow specialist that builds screen-flow understanding."""
     return Agent(
         role="AppFlow Specialist",
-        goal="Track where test cases start/fail and recommend best app entry points",
+        goal="Track where scenario items start/fail and recommend best app entry points",
         backstory=(
             "Navigation-focused QA analyst who maintains a persistent map of app screens "
             "and scenario entry points from previous automation attempts."
@@ -145,7 +150,9 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
         max_iter=20,
         tools=[appflow_memory_tool, qase_parser_tool, screen_inspector_tool],
         instructions=(
-            "Use qase_parser to pull the scenario highlighted in artifacts/current_scenario.json. "
+            "Read selected_scenario_id_for_this_run from artifacts/manager_plan.json, then use "
+            "qase_parser with query `scenario_id:<id>` to pull that exact scenario. "
+            "Never switch to implicit next-scenario selection. "
             "Treat app_flow_memory as the source of truth for prior observations.\n\n"
             "Planning protocol (mandatory):\n"
             "1) For each case, call `suggest_context` first.\n"

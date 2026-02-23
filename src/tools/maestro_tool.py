@@ -839,6 +839,10 @@ class MaestroAutomationTool(BaseTool):
             "recommendation": recommendation,
             "log_excerpt": self._trim_excerpt(combined),
             "log_path": str(log_file),
+            # Step indexes are filled from Maestro debug command logs when available.
+            "failed_step_index": None,
+            "last_successful_step_index": None,
+            "retry_from_step_index": None,
         }
 
     def _trim_excerpt(self, content: str) -> str:
@@ -888,16 +892,31 @@ class MaestroAutomationTool(BaseTool):
             return {}, None
 
         failed_selector = ""
+        failed_step_index: int | None = None
+        last_successful_step_index = 0
+        failed_command_name = ""
         hierarchy_root: Dict[str, Any] | None = None
-        for item in payload:
+        for idx, item in enumerate(payload, start=1):
             if not isinstance(item, dict):
                 continue
             metadata = item.get("metadata")
-            if not isinstance(metadata, dict) or metadata.get("status") != "FAILED":
+            if not isinstance(metadata, dict):
                 continue
+
+            status = str(metadata.get("status") or "").strip().upper()
+            if status in {"PASSED", "SUCCESS", "COMPLETED", "OK"}:
+                last_successful_step_index = idx
+                continue
+            if status != "FAILED":
+                continue
+            if failed_step_index is None:
+                failed_step_index = idx
 
             command = item.get("command")
             if isinstance(command, dict):
+                command_names = [str(name).strip() for name in command.keys() if str(name).strip()]
+                if command_names and not failed_command_name:
+                    failed_command_name = command_names[0]
                 tap = command.get("tapOnElement")
                 if isinstance(tap, dict):
                     selector = tap.get("selector")
@@ -918,7 +937,16 @@ class MaestroAutomationTool(BaseTool):
                     break
 
         if not hierarchy_root:
-            context = {"failed_selector": failed_selector} if failed_selector else {}
+            context: Dict[str, Any] = {}
+            if failed_selector:
+                context["failed_selector"] = failed_selector
+            if failed_command_name:
+                context["failed_command"] = failed_command_name
+            if failed_step_index is not None:
+                safe_last_success = min(last_successful_step_index, max(failed_step_index - 1, 0))
+                context["failed_step_index"] = failed_step_index
+                context["last_successful_step_index"] = safe_last_success
+                context["retry_from_step_index"] = safe_last_success + 1
             return context, None
 
         texts = self._extract_ui_text_candidates(hierarchy_root)
@@ -928,6 +956,13 @@ class MaestroAutomationTool(BaseTool):
         }
         if failed_selector:
             result["failed_selector"] = failed_selector
+        if failed_command_name:
+            result["failed_command"] = failed_command_name
+        if failed_step_index is not None:
+            safe_last_success = min(last_successful_step_index, max(failed_step_index - 1, 0))
+            result["failed_step_index"] = failed_step_index
+            result["last_successful_step_index"] = safe_last_success
+            result["retry_from_step_index"] = safe_last_success + 1
         if texts:
             result["hint"] = (
                 "Use ui_text_candidates as real on-screen labels for tap/assert "

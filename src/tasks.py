@@ -32,10 +32,12 @@ def parse_inputs_task(agent, test_cases_path: str, tested_info_path: str) -> Tas
 
 def map_appflow_task(agent, artifacts_dir: str) -> Task:
     description = f"""
-    Open `{artifacts_dir}/current_scenario.json` to identify the queued scenario, then fetch
-    the same scenario via qase_parser so context matches QA Manager decisions.
+    Open `{artifacts_dir}/manager_plan.json`, read `selected_scenario_id_for_this_run`, then
+    fetch that exact scenario via qase_parser query `scenario_id:<id>`.
+    Do not rely on implicit "next scenario" selection.
 
     Planning protocol (mandatory):
+    0) If `selected_scenario_id_for_this_run` is missing, stop and report a blocking error.
     1) For each case in the scenario, call `app_flow_memory.suggest_context`.
     2) Persist each hypothesis immediately via `app_flow_memory.record_plan`.
     3) If memory has no data, infer from title/preconditions/steps and mark low-confidence.
@@ -94,37 +96,39 @@ def plan_automation_sequence_task(agent, artifacts_dir: str) -> Task:
 def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: int) -> Task:
     description = f"""
     Automate exactly one pending scenario from qase_parser in this run.
-    You MUST include all test cases from that scenario in one consolidated YAML flow
-    (do not split into per-case YAML files). Build flow in case order, run against `{app_path}`,
+    You MUST include all scenario items from that scenario in one consolidated YAML flow
+    (do not split into multiple YAML files). Build flow in scenario-item order, run against `{app_path}`,
     and store artifacts under `{artifacts_dir}`.
 
     Execution protocol (mandatory):
     1) Read manager priorities from `{artifacts_dir}/manager_plan.json`.
-    2) Read latest AppFlow plan in `{artifacts_dir}`; if case guidance is missing, request
+    2) Read latest AppFlow plan in `{artifacts_dir}`; if item guidance is missing, request
        `recommended_start` from AppFlow specialist.
     3) Draft/update one scenario-level flow and call maestro_cli with
        `flow_scope: "scenario"` and `scenario_id`.
     4) After every draft/edit iteration, send full YAML to MaestroSenior and apply corrections
        before maestro_cli run.
     5) On failure, inspect `failure_context` (cause, recommendation, log excerpt,
-       debug_context.ui_text_candidates, failed_selector), share inline evidence with AppFlow,
-       rewrite YAML, and retry.
-    6) After each attempt, record AppFlow observation: case id, scenario id, status,
+       debug_context.ui_text_candidates, failed_selector, failed_step_index,
+       last_successful_step_index, retry_from_step_index), share inline evidence with AppFlow,
+       rewrite YAML from the failure point forward, and keep already validated prefix steps.
+    6) After each attempt, record AppFlow observation: item id (`test_id`), scenario id, status,
        location_hint, and failure_cause.
 
     Quality constraints:
     - Always capture screenshot on failed runs.
     - Never reuse unchanged selectors/commands that already failed.
-    - If testcase text language differs from app UI, trust visible UI labels/ids and
-      ui_text_candidates over testcase prose.
+    - If parsed step text language differs from app UI, trust visible UI labels/ids and
+      ui_text_candidates over parser text.
     - Use guidance from `skills/maestro-test-writing/SKILL.md`.
 
     Retry loop runs until scenario pass or attempt limit reaches {max_attempts}.
-    Mark unresolved cases as problematic.
+    Mark unresolved scenario items as problematic.
     """
 
     expected_output = (
-        "JSON summary saved to artifacts/automation_report.json that lists every test id, "
+        "JSON summary saved to artifacts/automation_report.json that lists every scenario item id "
+        "(test_id), "
         "attempt count, final status (passed, failed, problematic), and artifact pointers."
     )
 
