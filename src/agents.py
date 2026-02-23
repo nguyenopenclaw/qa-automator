@@ -32,7 +32,7 @@ def qa_manager_agent(qase_parser_tool, state_tracker_tool, appflow_memory_tool) 
         "Boundaries:\n"
         "- Never write Maestro YAML.\n"
         "- Never run maestro_cli directly.\n"
-        "- Delegate implementation to Automator with explicit acceptance criteria.\n\n"
+        "- Never delegate execution work directly; hand off via manager_plan/task outputs only.\n\n"
         "Output contract:\n"
         "- Keep response concise and actionable.\n"
         "- Include: selected scenario id, rationale, known blockers, remediation hints, "
@@ -46,7 +46,7 @@ def qa_manager_agent(qase_parser_tool, state_tracker_tool, appflow_memory_tool) 
             "Seasoned QA lead who thinks in execution strategy, scenario dependencies, "
             "and delivery sequencing across large regression sets."
         ),
-        allow_delegation=True,
+        allow_delegation=False,
         verbose=True,
         memory=True,
         max_iter=30,
@@ -68,14 +68,17 @@ def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_
         "4) Run maestro_cli using `scenario_id` and `flow_scope: \"scenario\"`.\n"
         "5) After each draft/edit iteration, send full YAML to MaestroSenior.\n"
         "6) Run maestro_cli only after MaestroSenior returns corrected YAML.\n"
-        "7) On failure, inspect failure_context, gather AppFlow feedback, rewrite YAML, retry.\n"
+        "7) On failure, send AppFlow a failure-step packet and wait for AppFlow response before retry.\n"
+        "   Packet must include: failed_step_index, last_successful_step_index, "
+        "retry_from_step_index, failure cause, log excerpt, and artifact paths.\n"
+        "   Do not infer or explain screen navigation for AppFlow.\n"
         "8) After every attempt (pass/fail), persist observation via app_flow_memory.record_observation "
         "with: test_id, scenario_id, status, attempt, location_hint, failure_cause, notes, "
         "screenshot_path, and confirmed. "
-        "Use maestro_cli.navigation_context as primary source: set location_hint=current_screen "
-        "(fallback from_screen), and send notes as JSON with current_screen, from_screen, "
-        "next_screen, action_hint, screen_chain, elements/ui_text_candidates, flow_id, "
-        "flow_description, and artifacts. Set confirmed=true only when status=passed and "
+        "For failed attempts, notes JSON must prioritize step failure metadata "
+        "(failed_step_index, last_successful_step_index, retry_from_step_index, cause, artifacts); "
+        "navigation interpretation is owned by AppFlow/Explorer. "
+        "Set confirmed=true only when status=passed and "
         "screenshot_path points to an existing screenshot artifact.\n\n"
         "Quality rules:\n"
         "- Never resend unchanged YAML after element_not_found/assertion_failed.\n"
@@ -92,7 +95,10 @@ def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_
         "Collaboration rules:\n"
         "- Coworkers may not access local file paths; provide inline evidence only "
         "(log_excerpt, ui_text_candidates, failed_selector).\n"
-        "- When blocked, ask AppFlow for concrete selector/screen updates, not generic advice.\n\n"
+        "- Do not help AppFlow build navigation hypotheses; AppFlow+Explorer owns navigation discovery.\n"
+        "- Ask AppFlow only for ready-to-apply recovery guidance after sending failure-step packet.\n"
+        "- Delegate only to MaestroSenior (YAML review) and AppFlow Specialist (navigation recovery).\n"
+        "- Never delegate to Explorer directly; only AppFlow Specialist may call Explorer.\n\n"
         "For writing and fixing Maestro flows, you MUST follow this project skill:\n"
         f"{maestro_skill}"
     )
@@ -150,7 +156,7 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
             "Navigation-focused QA analyst who maintains a persistent map of app screens "
             "and scenario entry points from previous automation attempts."
         ),
-        allow_delegation=False,
+        allow_delegation=True,
         verbose=True,
         memory=True,
         max_iter=20,
@@ -176,9 +182,85 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
             "can update `flow_*.json` with screen chain references (1 flow per scenario).\n"
             "- If evidence includes UI tree or ui_text_candidates, return refined selectors and concrete "
             "next-screen hints (no generic advice).\n\n"
+            "Explorer delegation protocol (mandatory):\n"
+            "- You are the ONLY role allowed to call Explorer.\n"
+            "- Delegate only to Explorer; never delegate to any other role.\n"
+            "- Call Explorer only when screen links are ambiguous or there is a gap after the "
+            "last known screen.\n"
+            "- Input you send to Explorer must include: scenario_id, test_id, the path to reach "
+            "the last known screen, last_known_screen, suspected next action, and expected unknown area.\n"
+            "- Explorer must execute Maestro flow continuation from the last known screen, then "
+            "capture screenshot and inspect the edge UI element.\n"
+            "- After Explorer reply, convert returned evidence into concrete transition updates and "
+            "persist via app_flow_memory.record_screen_transition.\n\n"
             "Response style:\n"
             "- Keep output short and actionable.\n"
             "- Per case, include: recommended_start, confidence, rationale, and next validation step.\n"
             "- When known, include screen chain preview and key elements for each screen."
+        ),
+    )
+
+
+def reporter_agent(state_tracker_tool, appflow_memory_tool) -> Agent:
+    """Instantiate reporting specialist that consolidates run outcomes."""
+    return Agent(
+        role="Automation Reporter",
+        goal="Produce concise run summaries with clear pass/fail/problem signals",
+        backstory=(
+            "Quality reporting specialist focused on clean execution metrics, artifact traceability, "
+            "and actionable follow-up notes for QA."
+        ),
+        allow_delegation=False,
+        verbose=True,
+        memory=True,
+        max_iter=15,
+        tools=[state_tracker_tool, appflow_memory_tool],
+        instructions=(
+            "Build the final run report only from persisted artifacts and tool outputs.\n"
+            "Do not rewrite execution history; summarize current state.\n"
+            "Keep output compact, decision-oriented, and traceable to artifact paths."
+        ),
+    )
+
+
+def explorer_agent(maestro_tool, screen_inspector_tool) -> Agent:
+    """Instantiate Explorer that probes unknown navigation from edge-known screen."""
+    return Agent(
+        role="Explorer",
+        goal=(
+            "Resolve unknown screen links by running targeted Maestro exploration and returning "
+            "edge-screen evidence"
+        ),
+        backstory=(
+            "Focused navigation probe specialist that continues from the last known screen, "
+            "captures concrete UI evidence, and reports only verified findings."
+        ),
+        allow_delegation=False,
+        verbose=True,
+        memory=True,
+        max_iter=20,
+        tools=[maestro_tool, screen_inspector_tool],
+        instructions=(
+            "You can be called ONLY by AppFlow Specialist. If any other role requests your help, "
+            "refuse and return: `forbidden_caller`.\n\n"
+            "Mission:\n"
+            "1) Receive navigation handoff from AppFlow: scenario_id, test_id, path_to_last_known_screen, "
+            "last_known_screen, suspected_next_action, unknown_target_hint.\n"
+            "2) Build/adjust Maestro YAML that reproduces path_to_last_known_screen and performs "
+            "one focused probing action beyond last_known_screen.\n"
+            "3) Execute via maestro_cli with screenshot enabled.\n"
+            "4) Immediately call screen_inspector.inspect for the same execution id/attempt.\n"
+            "5) Return strict structured result for AppFlow:\n"
+            "   - exploration_status\n"
+            "   - reached_screen\n"
+            "   - edge_element (single most informative UI marker)\n"
+            "   - ui_text_candidates (compact list)\n"
+            "   - screenshot_path\n"
+            "   - suggested_transition: from_screen, action_hint, to_screen (if inferred)\n"
+            "   - uncertainties\n\n"
+            "Constraints:\n"
+            "- Keep exploration deterministic and minimal: one unknown branch per run.\n"
+            "- Do not propose broad advice; provide concrete observed evidence only.\n"
+            "- Do not edit global plans or memory directly; AppFlow persists findings."
         ),
     )

@@ -42,6 +42,9 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
     2) Persist each hypothesis immediately via `app_flow_memory.record_plan`.
     3) If memory has no data, infer from title/preconditions/steps and mark low-confidence.
     4) Do not call `screen_inspector` in this pre-run planning task.
+    5) This task is pre-run planning only. Do not run runtime probing here.
+       Runtime ambiguity resolution (including Explorer delegation) happens during
+       automation retries, not during initial map drafting.
 
     Persist structured AppFlow outputs:
     - screen graph files in `{artifacts_dir}/app_flow_memory/screens/screen_*.json`
@@ -54,11 +57,37 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
 
     expected_output = (
         "JSON plan saved to artifacts/appflow_plan_<scenario_id>.json and updated "
-        "screen_*.json/flow_*.json graph artifacts for the selected scenario."
+        "screen_*.json/flow_*.json graph artifacts for the selected scenario, with "
+        "Explorer-assisted transition evidence when runtime gaps were detected."
     )
 
     return Task(
         name="Draft AppFlow plan",
+        description=description,
+        expected_output=expected_output,
+        agent=agent,
+    )
+
+
+def maestro_quality_gate_task(agent) -> Task:
+    description = """
+    Produce a strict Maestro quality gate checklist for the upcoming automation run.
+    Use upstream manager/appflow handoff context and return compact, executable guardrails:
+    - YAML validity requirements,
+    - deterministic selector strategy,
+    - synchronization requirements before interactions/assertions,
+    - retry/edit rules after failure (what must change vs what must stay intact),
+    - explicit pass/fail assertion expectations.
+
+    This gate is mandatory and must be consumed by Automator before execution.
+    """
+
+    expected_output = (
+        "Compact mandatory Maestro quality checklist ready for Automator to apply in the next task."
+    )
+
+    return Task(
+        name="Define Maestro quality gate",
         description=description,
         expected_output=expected_output,
         agent=agent,
@@ -111,15 +140,18 @@ def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: 
        `flow_scope: "scenario"` and `scenario_id`.
     4) After every draft/edit iteration, send full YAML to MaestroSenior and apply corrections
        before maestro_cli run.
-    5) On failure, inspect `failure_context` (cause, recommendation, log excerpt,
-       debug_context.ui_text_candidates, failed_selector, failed_step_index,
-       last_successful_step_index, retry_from_step_index, navigation_context), share inline evidence with AppFlow,
-       rewrite YAML from the failure point forward, and keep already validated prefix steps.
+    5) On failure, send AppFlow a strict failure-step packet:
+       failed_step_index, last_successful_step_index, retry_from_step_index, cause,
+       log_excerpt, failed_selector, and artifact pointers.
+       Do not provide AppFlow with your own navigation interpretation.
+       Wait for AppFlow response (possibly after AppFlow->Explorer probe), then
+       rewrite YAML from the failure point forward while keeping validated prefix steps.
+       Do not call Explorer directly.
     6) After each attempt, record AppFlow observation: item id (`test_id`), scenario id, status,
        location_hint, failure_cause, screenshot_path, and confirmed flag. Use
-       `navigation_context.current_screen` as location_hint (fallback `from_screen`), include full
-       navigation JSON + artifacts in notes, and set confirmed=true only for passed attempts with
-       existing screenshot evidence.
+       `navigation_context.current_screen` as location_hint (fallback `from_screen`) when available,
+       but in failed attempts keep notes focused on step-failure metadata for AppFlow/Explorer
+       investigation. Set confirmed=true only for passed attempts with existing screenshot evidence.
 
     Quality constraints:
     - Always capture screenshot on failed runs.

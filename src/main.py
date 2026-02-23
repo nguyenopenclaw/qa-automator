@@ -10,9 +10,17 @@ from crewai import Crew, Process
 from rich.console import Console
 from rich.table import Table
 
-from agents import appflow_specialist_agent, automator_agent, maestro_senior_agent, qa_manager_agent
+from agents import (
+    appflow_specialist_agent,
+    automator_agent,
+    explorer_agent,
+    maestro_senior_agent,
+    qa_manager_agent,
+    reporter_agent,
+)
 from tasks import (
     automate_tests_task,
+    maestro_quality_gate_task,
     map_appflow_task,
     parse_inputs_task,
     plan_automation_sequence_task,
@@ -83,16 +91,19 @@ def run(
     manager = qa_manager_agent(qase_tool, state_tool, appflow_tool)
     automator = automator_agent(maestro_tool, qase_tool, state_tool, appflow_tool)
     appflow = appflow_specialist_agent(appflow_tool, qase_tool, screen_tool)
+    explorer = explorer_agent(maestro_tool, screen_tool)
     maestro_senior = maestro_senior_agent()
+    reporter = reporter_agent(state_tool, appflow_tool)
 
     crew = Crew(
-        agents=[manager, appflow, maestro_senior, automator],
+        agents=[manager, appflow, explorer, maestro_senior, automator, reporter],
         tasks=[
             parse_inputs_task(manager, str(test_cases), str(tested)),
             plan_automation_sequence_task(manager, str(output)),
             map_appflow_task(appflow, str(output)),
+            maestro_quality_gate_task(maestro_senior),
             automate_tests_task(automator, str(app_path), str(output), max_attempts),
-            summarize_results_task(manager),
+            summarize_results_task(reporter),
         ],
         process=Process.sequential,
         verbose=True,

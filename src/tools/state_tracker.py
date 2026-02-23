@@ -27,12 +27,13 @@ class AutomationStateTrackerTool(BaseTool):
 
     artifacts_dir: Path
     _report_path: Path = PrivateAttr()
-    _state: Dict[str, Any] = PrivateAttr(default_factory=lambda: {"tests": []})
+    _state: Dict[str, Any] = PrivateAttr(default_factory=lambda: {"tests": [], "scenarios": []})
 
     def model_post_init(self, __context: Any) -> None:
         self._report_path = self.artifacts_dir / "automation_report.json"
         if self._report_path.exists():
             self._state = json.loads(self._report_path.read_text(encoding="utf-8"))
+        self._normalize_state()
 
     def _run(
         self,
@@ -85,12 +86,40 @@ class AutomationStateTrackerTool(BaseTool):
 
     # Helpers ----------------------------------------------------------
     def _get_or_create(self, test_id: str) -> Dict[str, Any]:
-        for test in self._state["tests"]:
+        bucket_key = "scenarios" if self._is_scenario_id(test_id) else "tests"
+        for test in self._state[bucket_key]:
             if test["id"] == test_id:
                 return test
         entry = {"id": test_id, "attempts": 0, "status": "pending", "artifacts": []}
-        self._state["tests"].append(entry)
+        self._state[bucket_key].append(entry)
         return entry
+
+    def _is_scenario_id(self, value: str | None) -> bool:
+        return str(value or "").strip().startswith("scenario_")
+
+    def _normalize_state(self) -> None:
+        tests = self._state.get("tests", [])
+        scenarios = self._state.get("scenarios", [])
+        if not isinstance(tests, list):
+            tests = []
+        if not isinstance(scenarios, list):
+            scenarios = []
+
+        migrated_tests: List[Dict[str, Any]] = []
+        migrated_scenarios: List[Dict[str, Any]] = list(scenarios)
+        for item in tests:
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id", "")).strip()
+            if self._is_scenario_id(item_id):
+                migrated_scenarios.append(item)
+            else:
+                migrated_tests.append(item)
+
+        self._state = {
+            "tests": migrated_tests,
+            "scenarios": migrated_scenarios,
+        }
 
     def _write(self) -> None:
         self._report_path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")

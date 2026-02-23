@@ -16,7 +16,7 @@ agents:
       - qase_parser
       - state_tracker
       - app_flow_memory
-    allow_delegation: true
+    allow_delegation: false
     verbose: true
 
   appflow_specialist:
@@ -30,6 +30,19 @@ agents:
       - app_flow_memory
       - qase_parser
       - screen_inspector
+    allow_delegation: true
+    verbose: true
+
+  explorer:
+    role: "Explorer"
+    goal: "Probe unknown navigation branches from the last known screen"
+    backstory: |
+      Focused navigation probe specialist invoked only by AppFlow to run
+      minimal Maestro exploration and return screenshot + edge UI evidence.
+    max_iter: 20
+    tools:
+      - maestro_cli
+      - screen_inspector
     allow_delegation: false
     verbose: true
 
@@ -41,6 +54,19 @@ agents:
       resilient selectors, and anti-flakiness review.
     max_iter: 20
     tools: []
+    allow_delegation: false
+    verbose: true
+
+  reporter:
+    role: "Automation Reporter"
+    goal: "Summarize run outcomes from persisted artifacts and metrics"
+    backstory: |
+      Reporting-focused QA specialist who keeps final execution summaries concise,
+      traceable, and decision-oriented.
+    max_iter: 15
+    tools:
+      - state_tracker
+      - app_flow_memory
     allow_delegation: false
     verbose: true
 
