@@ -22,17 +22,18 @@ class MaestroToolInput(BaseModel):
         default="{}",
         description=(
             "JSON payload with fields: test_case, attempt, screenshot, is_onboarding, "
-            "scenario_id, optional flow_clear_state, optional flow_yaml."
+            "scenario_id, optional flow_scope ('test_case'|'scenario'), optional "
+            "flow_clear_state, optional flow_yaml."
         ),
     )
 
 
 class MaestroAutomationTool(BaseTool):
-    """Generates Maestro flows and executes them for a single test case."""
+    """Generates Maestro flows and executes them per case or whole scenario."""
 
     name: str = "maestro_cli"
     description: str = (
-        "Generate temporary Maestro flows for the provided test case payload, "
+        "Generate temporary Maestro flows for the provided payload, "
         "execute them against the supplied app binary, and capture screenshots/logs."
     )
     args_schema: type[BaseModel] = MaestroToolInput
@@ -102,6 +103,9 @@ class MaestroAutomationTool(BaseTool):
         screenshot = bool(resolved_payload.get("screenshot", False))
         is_onboarding = resolved_payload.get("is_onboarding")
         scenario_id = resolved_payload.get("scenario_id")
+        flow_scope = str(resolved_payload.get("flow_scope", "test_case") or "test_case").strip().lower()
+        if flow_scope not in {"test_case", "scenario"}:
+            flow_scope = "test_case"
         flow_yaml = resolved_payload.get("flow_yaml")
         if flow_yaml is not None:
             flow_yaml = str(flow_yaml)
@@ -116,6 +120,7 @@ class MaestroAutomationTool(BaseTool):
             screenshot,
             is_onboarding,
             scenario_id,
+            flow_scope,
             flow_clear_state,
             flow_yaml,
         )
@@ -128,26 +133,30 @@ class MaestroAutomationTool(BaseTool):
         request_screenshot: bool = False,
         is_onboarding: bool | None = None,
         scenario_id: str | None = None,
+        flow_scope: str = "test_case",
         flow_clear_state: bool | None = None,
         flow_yaml: str | None = None,
     ) -> Dict[str, Any]:
-        test_id = test_case.get("id", f"anon-{attempt}")
-        install_failure = self._ensure_app_installed(test_id, scenario_id)
+        test_id = str(test_case.get("id", f"anon-{attempt}"))
+        execution_id = scenario_id if flow_scope == "scenario" and scenario_id else test_id
+        install_failure = self._ensure_app_installed(execution_id, scenario_id)
         if install_failure:
             return install_failure
         if not is_onboarding:
-            self._skip_onboarding_if_possible(test_id)
+            self._skip_onboarding_if_possible(execution_id)
         self._note_screenshots_dir().mkdir(parents=True, exist_ok=True)
         flow_path = self._write_flow(
             test_case=test_case,
             attempt=attempt,
+            scenario_id=scenario_id,
+            flow_scope=flow_scope,
             flow_clear_state=flow_clear_state,
             flow_yaml=flow_yaml,
         )
         if not self._flow_contains_assertions(flow_path):
             log_path = self.artifacts_dir / "logs"
             log_path.mkdir(parents=True, exist_ok=True)
-            log_file = log_path / f"{test_id}-attempt-{attempt}.log"
+            log_file = log_path / f"{execution_id}-attempt-{attempt}.log"
             log_file.write_text(
                 (
                     "Generated Maestro flow has no assertVisible/assertNotVisible commands.\n"
@@ -157,7 +166,7 @@ class MaestroAutomationTool(BaseTool):
                 encoding="utf-8",
             )
             return {
-                "test_id": test_id,
+                "test_id": execution_id,
                 "status": "failed",
                 "attempt": attempt,
                 "artifacts": [str(log_file), str(flow_path)],
@@ -179,7 +188,7 @@ class MaestroAutomationTool(BaseTool):
 
         log_path = self.artifacts_dir / "logs"
         log_path.mkdir(parents=True, exist_ok=True)
-        log_file = log_path / f"{test_id}-attempt-{attempt}.log"
+        log_file = log_path / f"{execution_id}-attempt-{attempt}.log"
 
         try:
             result = subprocess.run(
@@ -196,7 +205,7 @@ class MaestroAutomationTool(BaseTool):
                 encoding="utf-8",
             )
             return {
-                "test_id": test_id,
+                "test_id": execution_id,
                 "status": "failed",
                 "attempt": attempt,
                 "artifacts": [str(log_file)],
@@ -215,7 +224,7 @@ class MaestroAutomationTool(BaseTool):
                 encoding="utf-8",
             )
             return {
-                "test_id": test_id,
+                "test_id": execution_id,
                 "status": "failed",
                 "attempt": attempt,
                 "artifacts": [str(log_file)],
@@ -229,19 +238,19 @@ class MaestroAutomationTool(BaseTool):
 
         artifacts: List[str] = [str(log_file)]
         if request_screenshot:
-            shot = self._capture_screenshot(test_id, attempt)
+            shot = self._capture_screenshot(execution_id, attempt)
             if shot:
                 artifacts.append(shot)
 
         status = "passed" if result.returncode == 0 else "failed"
         response: Dict[str, Any] = {
-            "test_id": test_id,
+            "test_id": execution_id,
             "status": status,
             "attempt": attempt,
             "artifacts": artifacts,
         }
         if status == "failed" and not request_screenshot:
-            shot = self._capture_screenshot(test_id, attempt)
+            shot = self._capture_screenshot(execution_id, attempt)
             if shot:
                 artifacts.append(shot)
         if status == "failed":
@@ -496,12 +505,18 @@ class MaestroAutomationTool(BaseTool):
         self,
         test_case: Dict[str, Any],
         attempt: int,
+        scenario_id: str | None = None,
+        flow_scope: str = "test_case",
         flow_clear_state: bool | None = None,
         flow_yaml: str | None = None,
     ) -> Path:
         flow_dir = self.generated_flows_dir
         flow_dir.mkdir(parents=True, exist_ok=True)
-        flow_path = flow_dir / f"{test_case.get('id', 'anon')}.yaml"
+        if flow_scope == "scenario" and scenario_id:
+            file_stem = str(scenario_id).strip() or "scenario"
+        else:
+            file_stem = str(test_case.get("id", "anon")).strip() or "anon"
+        flow_path = flow_dir / f"{file_stem}.yaml"
         app_id = (self.app_id or "default").strip() or "default"
         resolved_clear_state = self._resolve_flow_clear_state(flow_clear_state, attempt)
         if flow_yaml and flow_yaml.strip():
