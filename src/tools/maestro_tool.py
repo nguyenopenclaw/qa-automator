@@ -40,6 +40,7 @@ class MaestroAutomationTool(BaseTool):
     skip_onboarding_deeplink: str | None = None
     command_timeout_seconds: int = 120
     screenshot_max_side_px: int = 1440
+    failure_excerpt_max_chars: int = 4000
 
     def _run(
         self,
@@ -68,6 +69,11 @@ class MaestroAutomationTool(BaseTool):
                 "attempt": 1,
                 "error": f"invalid_payload_json: {exc}",
                 "artifacts": [str(log_file)],
+                "failure_context": {
+                    "cause": "invalid_payload_json",
+                    "recommendation": "Send strict JSON payload with fields test_case and attempt.",
+                    "log_excerpt": log_file.read_text(encoding="utf-8"),
+                },
             }
         test_case = resolved_payload.get("test_case", {})
         attempt = int(resolved_payload.get("attempt", 1))
@@ -115,6 +121,12 @@ class MaestroAutomationTool(BaseTool):
                 "status": "failed",
                 "attempt": attempt,
                 "artifacts": [str(log_file)],
+                "error": "maestro_binary_not_found",
+                "failure_context": self._build_failure_context(
+                    stdout="",
+                    stderr=f"maestro binary not found: {self.maestro_bin}",
+                    log_file=log_file,
+                ),
             }
         except subprocess.TimeoutExpired as exc:
             stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
@@ -128,6 +140,12 @@ class MaestroAutomationTool(BaseTool):
                 "status": "failed",
                 "attempt": attempt,
                 "artifacts": [str(log_file)],
+                "error": "maestro_timeout",
+                "failure_context": self._build_failure_context(
+                    stdout=stdout,
+                    stderr=stderr or f"maestro command timed out after {self.command_timeout_seconds}s",
+                    log_file=log_file,
+                ),
             }
 
         artifacts: List[str] = [str(log_file)]
@@ -137,17 +155,25 @@ class MaestroAutomationTool(BaseTool):
                 artifacts.append(shot)
 
         status = "passed" if result.returncode == 0 else "failed"
-        if status == "failed" and not request_screenshot:
-            shot = self._capture_screenshot(test_id, attempt)
-            if shot:
-                artifacts.append(shot)
-
-        return {
+        response: Dict[str, Any] = {
             "test_id": test_id,
             "status": status,
             "attempt": attempt,
             "artifacts": artifacts,
         }
+        if status == "failed" and not request_screenshot:
+            shot = self._capture_screenshot(test_id, attempt)
+            if shot:
+                artifacts.append(shot)
+        if status == "failed":
+            response["failure_context"] = self._build_failure_context(
+                stdout=result.stdout,
+                stderr=result.stderr,
+                log_file=log_file,
+            )
+            response["error"] = response["failure_context"].get("cause")
+
+        return response
 
     # Helpers ----------------------------------------------------------
     def _write_flow(self, test_case: Dict[str, Any]) -> Path:
@@ -166,6 +192,57 @@ class MaestroAutomationTool(BaseTool):
             payload = step.get("payload") or step.get("value") or step.get("text") or ""
             lines.append(f"- {action}: {json.dumps(payload)}")
         return "\n".join(lines) if lines else "- launchApp"
+
+    def _build_failure_context(self, stdout: str, stderr: str, log_file: Path) -> Dict[str, str]:
+        """Return compact diagnostics so the agent can fix flow on next retry."""
+        combined = "\n".join(part for part in [stdout, stderr] if part).strip()
+        lower = combined.lower()
+        cause = "unknown_maestro_failure"
+        recommendation = (
+            "Inspect failed command in log excerpt, add synchronization, and prefer stable selectors."
+        )
+
+        if "timed out" in lower or "timeout" in lower:
+            cause = "timeout"
+            recommendation = (
+                "Add waitForAnimationToEnd/extendedWaitUntil before next assertion or tap, "
+                "then retry."
+            )
+        elif "element" in lower and "not found" in lower:
+            cause = "element_not_found"
+            recommendation = (
+                "Update selector text/id to match current screen and use scrollUntilVisible "
+                "before interacting."
+            )
+        elif "assert" in lower and "failed" in lower:
+            cause = "assertion_failed"
+            recommendation = (
+                "Verify expected state transition; add sync step before assertion and adjust "
+                "assertVisible/assertNotVisible."
+            )
+        elif "yaml" in lower and ("parse" in lower or "invalid" in lower):
+            cause = "invalid_yaml"
+            recommendation = (
+                "Rewrite step into valid Maestro command syntax; do not use raw prose as YAML keys."
+            )
+        elif "binary not found" in lower:
+            cause = "maestro_binary_not_found"
+            recommendation = "Install Maestro CLI or set MAESTRO_BIN to a valid executable path."
+
+        return {
+            "cause": cause,
+            "recommendation": recommendation,
+            "log_excerpt": self._trim_excerpt(combined),
+            "log_path": str(log_file),
+        }
+
+    def _trim_excerpt(self, content: str) -> str:
+        if not content:
+            return ""
+        max_chars = max(256, int(self.failure_excerpt_max_chars))
+        if len(content) <= max_chars:
+            return content
+        return content[-max_chars:]
 
     def _capture_screenshot(self, test_id: str, attempt: int) -> str | None:
         shots_dir = self.artifacts_dir / "screenshots" / test_id

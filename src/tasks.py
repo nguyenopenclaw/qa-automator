@@ -32,9 +32,12 @@ def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: 
     this run (do not process multiple scenarios). For each case in this chosen scenario,
     synthesize a naive Maestro flow, run it against `{app_path}`, and capture artifacts under
     `{artifacts_dir}`. Always grab a screenshot whenever a run fails so you can inspect
-    the UI state before the next iteration. Respect the attempt limit of {max_attempts}
-    tries per case. For each attempt log inputs, Maestro stdout/stderr, and whether
-    additional screenshots were requested. Mark unresolved cases as problematic.
+    the UI state before the next iteration. You MUST use guidance from
+    `skills/maestro-test-writing/SKILL.md` while writing/fixing Maestro flow files.
+    For every failed run, inspect returned `failure_context` (log excerpt, cause,
+    recommendation) and adjust steps before retrying. Respect the attempt limit of
+    {max_attempts} tries per case. For each attempt log inputs, Maestro stdout/stderr,
+    and whether additional screenshots were requested. Mark unresolved cases as problematic.
     """
 
     expected_output = (
