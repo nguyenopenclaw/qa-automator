@@ -503,26 +503,38 @@ class MaestroAutomationTool(BaseTool):
         flow_dir.mkdir(parents=True, exist_ok=True)
         flow_path = flow_dir / f"{test_case.get('id', 'anon')}.yaml"
         app_id = (self.app_id or "default").strip() or "default"
+        resolved_clear_state = self._resolve_flow_clear_state(flow_clear_state, attempt)
         if flow_yaml and flow_yaml.strip():
-            flow_content = self._normalize_flow_yaml(flow_yaml=flow_yaml, app_id=app_id)
+            flow_content = self._normalize_flow_yaml(
+                flow_yaml=flow_yaml,
+                app_id=app_id,
+                clear_state=resolved_clear_state,
+            )
         else:
             steps_yaml = self._steps_to_yaml(
                 steps=test_case.get("steps", []),
-                clear_state=self._resolve_flow_clear_state(flow_clear_state, attempt),
+                clear_state=resolved_clear_state,
             )
             flow_content = f"appId: {app_id}\n---\n" + steps_yaml
         flow_path.write_text(flow_content, encoding="utf-8")
         return flow_path
 
-    def _normalize_flow_yaml(self, flow_yaml: str, app_id: str) -> str:
+    def _normalize_flow_yaml(self, flow_yaml: str, app_id: str, clear_state: bool) -> str:
         raw = flow_yaml.strip()
         if not raw:
-            return f"appId: {app_id}\n---\n- launchApp"
+            return f"appId: {app_id}\n---\n" + "\n".join(
+                self._default_launch_app_lines(clear_state=clear_state)
+            )
+
+        body = raw
         if raw.startswith("appId:"):
-            return raw
-        if raw.startswith("---"):
-            return f"appId: {app_id}\n{raw}"
-        return f"appId: {app_id}\n---\n{raw}"
+            _, _, tail = raw.partition("---")
+            body = tail.strip() if tail else ""
+        elif raw.startswith("---"):
+            body = raw.removeprefix("---").strip()
+
+        normalized_body = self._ensure_launch_app_block(body=body, clear_state=clear_state)
+        return f"appId: {app_id}\n---\n{normalized_body}"
 
     def _steps_to_yaml(self, steps: List[Dict[str, Any]], clear_state: bool) -> str:
         lines: List[str] = self._default_launch_app_lines(clear_state=clear_state)
@@ -530,14 +542,54 @@ class MaestroAutomationTool(BaseTool):
             lines.extend(self._normalize_step_to_commands(step))
         return "\n".join(lines)
 
+    def _ensure_launch_app_block(self, body: str, clear_state: bool) -> str:
+        lines = body.splitlines() if body else []
+        launch_pattern = re.compile(r"^(\s*)-\s*launchApp\s*:?\s*$")
+        launch_idx: int | None = None
+        launch_indent_len = 0
+
+        for idx, line in enumerate(lines):
+            match = launch_pattern.match(line)
+            if match:
+                launch_idx = idx
+                launch_indent_len = len(match.group(1))
+                break
+
+        default_lines = self._default_launch_app_lines(clear_state=clear_state)
+        if launch_idx is None:
+            return "\n".join(default_lines + lines).strip()
+
+        prefix = " " * launch_indent_len
+        indented_defaults = [f"{prefix}{default_lines[0]}"] + [
+            f"{prefix}{line}" for line in default_lines[1:]
+        ]
+        normalized: List[str] = lines[:launch_idx] + indented_defaults
+
+        idx = launch_idx + 1
+        while idx < len(lines):
+            current = lines[idx]
+            current_strip = current.strip()
+            if not current_strip:
+                idx += 1
+                continue
+
+            current_indent = len(current) - len(current.lstrip(" "))
+            is_next_list_item = current.lstrip(" ").startswith("- ")
+            if is_next_list_item and current_indent <= launch_indent_len:
+                break
+            idx += 1
+
+        normalized.extend(lines[idx:])
+        return "\n".join(normalized).strip()
+
     def _default_launch_app_lines(self, clear_state: bool) -> List[str]:
         """Standard app start config aligned with project onboarding flow."""
         return [
             "- launchApp:",
             f"    clearState: {'true' if clear_state else 'false'}",
             "    clearKeychain: false",
-            "    stopApp: false",
-            "    permissions: { all: deny }",
+            "    stopApp: true",
+            "    permissions: { all: allow }",
         ]
 
     def _resolve_flow_clear_state(self, explicit: bool | None, attempt: int) -> bool:
