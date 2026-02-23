@@ -765,7 +765,9 @@ class AppFlowMemoryTool(BaseTool):
         confirmed: bool | None = None,
         strict: bool = True,
     ) -> Dict[str, Any]:
-        if not test_id and strict:
+        # Direct tool calls may provide scenario_id without test_id. In that case we can still
+        # persist screen graph updates because flow correlation is scenario-scoped.
+        if not test_id and not scenario_id and strict:
             raise ValueError("record_screen_transition requires test_id")
         if not current_screen and not next_screen and not elements:
             if strict:
