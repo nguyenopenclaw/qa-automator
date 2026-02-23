@@ -60,9 +60,10 @@ class MaestroAutomationTool(BaseTool):
         if not is_onboarding:
             self._skip_onboarding_if_possible(test_id)
         flow_path = self._write_flow(test_case)
-        cmd = [self.maestro_bin, "test", str(flow_path), "-a", str(self.app_path)]
+        cmd = [self.maestro_bin]
         if self.device:
-            cmd.extend(["-d", self.device])
+            cmd.extend(["--device", self.device])
+        cmd.extend(["test", str(flow_path)])
 
         log_path = self.artifacts_dir / "logs"
         log_path.mkdir(parents=True, exist_ok=True)
@@ -143,9 +144,10 @@ class MaestroAutomationTool(BaseTool):
         shots_dir = self.artifacts_dir / "screenshots" / test_id
         shots_dir.mkdir(parents=True, exist_ok=True)
         shot_path = shots_dir / f"attempt-{attempt}.png"
-        cmd = [self.maestro_bin, "screenshot", str(shot_path)]
+        cmd = [self.maestro_bin]
         if self.device:
-            cmd.extend(["-d", self.device])
+            cmd.extend(["--device", self.device])
+        cmd.extend(["screenshot", str(shot_path)])
         try:
             subprocess.run(
                 cmd,
@@ -160,9 +162,10 @@ class MaestroAutomationTool(BaseTool):
     def _skip_onboarding_if_possible(self, test_id: str) -> None:
         if not self.skip_onboarding_deeplink:
             return
-        cmd = [self.maestro_bin, "open", "--url", self.skip_onboarding_deeplink]
+        cmd = [self.maestro_bin]
         if self.device:
-            cmd.extend(["-d", self.device])
+            cmd.extend(["--device", self.device])
+        cmd.extend(["open", "--url", self.skip_onboarding_deeplink])
         try:
             subprocess.run(
                 cmd,
