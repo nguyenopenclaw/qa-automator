@@ -18,7 +18,7 @@ def _load_maestro_skill() -> str:
     return skill_path.read_text(encoding="utf-8").strip()
 
 
-def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agent:
+def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_memory_tool) -> Agent:
     """Instantiate the manager agent that drives all tasks."""
     maestro_skill = _load_maestro_skill()
     instructions = (
@@ -31,6 +31,9 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
         "to reason about the state before adjusting steps. When testcase wording/selectors are in "
         "a different language than the app UI, treat the screenshot as source of truth and map "
         "steps to the actual on-screen English selector text/labels before retrying. "
+        "You MUST actively rewrite flow between retries: never resend an unchanged flow after "
+        "element_not_found/assertion_failed. Prefer sending maestro_cli payload with `flow_yaml` "
+        "that contains the updated commands for this attempt. "
         "Respect the retry ceiling "
         "(10 attempts unless overridden), request screenshots when state is ambiguous, and "
         "clearly mark unresolved cases as problematic.\n\n"
@@ -41,12 +44,17 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
         "Each run processes exactly one scenario but all its cases. Always pass `scenario_id` "
         "in maestro_cli payload so tooling can perform clean app reinstall per scenario. "
         "Before drafting a flow for each case, delegate to AppFlow specialist and ask for "
-        "recommended start context/screen for that case. After each attempt (pass/fail), "
-        "send the observed location and failure cause back to AppFlow so its flow map "
+        "recommended start context/screen for that case. After every attempt (pass/fail), "
+        "you MUST persist outcome via app_flow_memory.record_observation with: test_id, "
+        "scenario_id, status, attempt, location_hint, and failure_cause so the flow map "
         "improves across runs. IMPORTANT: coworkers may not access local filesystem paths. "
         "When asking AppFlow specialist for help, include inline evidence from "
         "`failure_context` (log_excerpt + debug_context.ui_text_candidates + failed_selector) "
         "directly in your question; do NOT ask the specialist to open local artifact paths.\n\n"
+        "After EACH flow edit iteration (initial draft and every retry), delegate to "
+        "MaestroSenior with the full current YAML and latest failure context (if any). "
+        "Only run maestro_cli after MaestroSenior returns a corrected YAML. Treat this "
+        "as mandatory quality gate to remove obvious YAML/synchronization/selector mistakes.\n\n"
         "For writing and fixing Maestro flows, you MUST follow this project skill:\n"
         f"{maestro_skill}"
     )
@@ -62,8 +70,33 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
         verbose=True,
         memory=True,
         max_iter=30,
-        tools=[maestro_tool, qase_parser_tool, state_tracker_tool],
+        tools=[maestro_tool, qase_parser_tool, state_tracker_tool, appflow_memory_tool],
         instructions=instructions,
+    )
+
+
+def maestro_senior_agent() -> Agent:
+    """Instantiate senior reviewer that improves Maestro YAML quality."""
+    return Agent(
+        role="MaestroSenior",
+        goal="Harden Maestro YAML flows and remove obvious mistakes before execution",
+        backstory=(
+            "Principal mobile automation engineer specializing in resilient Maestro flows, "
+            "strict YAML correctness, and flaky-selector mitigation."
+        ),
+        allow_delegation=False,
+        verbose=True,
+        memory=True,
+        max_iter=20,
+        tools=[],
+        instructions=(
+            "You act as a mandatory flow quality gate. When manager sends a Maestro flow, "
+            "return corrected YAML only. Remove obvious errors: invalid YAML structure, raw prose "
+            "instead of commands, missing synchronization around transitions, weak/ambiguous "
+            "selectors, and missing explicit assertions for expected outcome. Keep fixes compact "
+            "and deterministic; preserve testcase intent. If failure_context is provided, use it "
+            "to adjust selectors/timing before next run."
+        ),
     )
 
 

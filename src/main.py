@@ -10,7 +10,7 @@ from crewai import Crew, Process
 from rich.console import Console
 from rich.table import Table
 
-from agents import appflow_specialist_agent, qa_manager_agent
+from agents import appflow_specialist_agent, maestro_senior_agent, qa_manager_agent
 from tasks import automate_tests_task, map_appflow_task, parse_inputs_task, summarize_results_task
 from tools.appflow_tool import AppFlowMemoryTool
 from tools.maestro_tool import MaestroAutomationTool
@@ -63,6 +63,7 @@ def run(
         install_app_before_test=_env_bool("MAESTRO_INSTALL_APP_BEFORE_TEST", True),
         install_app_once=_env_bool("MAESTRO_INSTALL_APP_ONCE", True),
         reinstall_app_per_scenario=_env_bool("MAESTRO_REINSTALL_APP_PER_SCENARIO", True),
+        flow_clear_state_default=_env_bool("MAESTRO_FLOW_CLEAR_STATE_DEFAULT", True),
     )
     qase_tool = QaseTestParserTool(
         test_cases_path=test_cases,
@@ -73,11 +74,12 @@ def run(
     appflow_tool = AppFlowMemoryTool(artifacts_dir=output)
     screen_tool = ScreenInspectorTool(artifacts_dir=output)
 
-    manager = qa_manager_agent(maestro_tool, qase_tool, state_tool)
+    manager = qa_manager_agent(maestro_tool, qase_tool, state_tool, appflow_tool)
     appflow = appflow_specialist_agent(appflow_tool, qase_tool, screen_tool)
+    maestro_senior = maestro_senior_agent()
 
     crew = Crew(
-        agents=[manager, appflow],
+        agents=[manager, appflow, maestro_senior],
         tasks=[
             parse_inputs_task(manager, str(test_cases), str(tested)),
             map_appflow_task(appflow, str(output)),

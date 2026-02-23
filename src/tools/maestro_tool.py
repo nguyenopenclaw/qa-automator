@@ -20,7 +20,10 @@ class MaestroToolInput(BaseModel):
 
     payload: str = Field(
         default="{}",
-        description="JSON payload with fields: test_case, attempt, screenshot, is_onboarding.",
+        description=(
+            "JSON payload with fields: test_case, attempt, screenshot, is_onboarding, "
+            "scenario_id, optional flow_clear_state, optional flow_yaml."
+        ),
     )
 
 
@@ -46,6 +49,7 @@ class MaestroAutomationTool(BaseTool):
     install_app_before_test: bool = True
     install_app_once: bool = True
     reinstall_app_per_scenario: bool = True
+    flow_clear_state_default: bool = True
     command_timeout_seconds: int = 120
     screenshot_max_side_px: int = 1440
     failure_excerpt_max_chars: int = 4000
@@ -98,7 +102,23 @@ class MaestroAutomationTool(BaseTool):
         screenshot = bool(resolved_payload.get("screenshot", False))
         is_onboarding = resolved_payload.get("is_onboarding")
         scenario_id = resolved_payload.get("scenario_id")
-        return self.run_test_case(test_case, attempt, screenshot, is_onboarding, scenario_id)
+        flow_yaml = resolved_payload.get("flow_yaml")
+        if flow_yaml is not None:
+            flow_yaml = str(flow_yaml)
+        flow_clear_state = resolved_payload.get("flow_clear_state")
+        if isinstance(flow_clear_state, str):
+            flow_clear_state = flow_clear_state.strip().lower() in {"1", "true", "yes", "on"}
+        elif not isinstance(flow_clear_state, bool):
+            flow_clear_state = None
+        return self.run_test_case(
+            test_case,
+            attempt,
+            screenshot,
+            is_onboarding,
+            scenario_id,
+            flow_clear_state,
+            flow_yaml,
+        )
 
     # Core execution ---------------------------------------------------
     def run_test_case(
@@ -108,6 +128,8 @@ class MaestroAutomationTool(BaseTool):
         request_screenshot: bool = False,
         is_onboarding: bool | None = None,
         scenario_id: str | None = None,
+        flow_clear_state: bool | None = None,
+        flow_yaml: str | None = None,
     ) -> Dict[str, Any]:
         test_id = test_case.get("id", f"anon-{attempt}")
         install_failure = self._ensure_app_installed(test_id, scenario_id)
@@ -116,7 +138,12 @@ class MaestroAutomationTool(BaseTool):
         if not is_onboarding:
             self._skip_onboarding_if_possible(test_id)
         self._note_screenshots_dir().mkdir(parents=True, exist_ok=True)
-        flow_path = self._write_flow(test_case)
+        flow_path = self._write_flow(
+            test_case=test_case,
+            attempt=attempt,
+            flow_clear_state=flow_clear_state,
+            flow_yaml=flow_yaml,
+        )
         if not self._flow_contains_assertions(flow_path):
             log_path = self.artifacts_dir / "logs"
             log_path.mkdir(parents=True, exist_ok=True)
@@ -465,31 +492,59 @@ class MaestroAutomationTool(BaseTool):
         cmd.extend(["uninstall", self.app_id])
         return cmd
 
-    def _write_flow(self, test_case: Dict[str, Any]) -> Path:
+    def _write_flow(
+        self,
+        test_case: Dict[str, Any],
+        attempt: int,
+        flow_clear_state: bool | None = None,
+        flow_yaml: str | None = None,
+    ) -> Path:
         flow_dir = self.generated_flows_dir
         flow_dir.mkdir(parents=True, exist_ok=True)
         flow_path = flow_dir / f"{test_case.get('id', 'anon')}.yaml"
-        steps_yaml = self._steps_to_yaml(test_case.get("steps", []))
         app_id = (self.app_id or "default").strip() or "default"
-        flow_content = f"appId: {app_id}\n---\n" + steps_yaml
+        if flow_yaml and flow_yaml.strip():
+            flow_content = self._normalize_flow_yaml(flow_yaml=flow_yaml, app_id=app_id)
+        else:
+            steps_yaml = self._steps_to_yaml(
+                steps=test_case.get("steps", []),
+                clear_state=self._resolve_flow_clear_state(flow_clear_state, attempt),
+            )
+            flow_content = f"appId: {app_id}\n---\n" + steps_yaml
         flow_path.write_text(flow_content, encoding="utf-8")
         return flow_path
 
-    def _steps_to_yaml(self, steps: List[Dict[str, Any]]) -> str:
-        lines: List[str] = self._default_launch_app_lines()
+    def _normalize_flow_yaml(self, flow_yaml: str, app_id: str) -> str:
+        raw = flow_yaml.strip()
+        if not raw:
+            return f"appId: {app_id}\n---\n- launchApp"
+        if raw.startswith("appId:"):
+            return raw
+        if raw.startswith("---"):
+            return f"appId: {app_id}\n{raw}"
+        return f"appId: {app_id}\n---\n{raw}"
+
+    def _steps_to_yaml(self, steps: List[Dict[str, Any]], clear_state: bool) -> str:
+        lines: List[str] = self._default_launch_app_lines(clear_state=clear_state)
         for step in steps:
             lines.extend(self._normalize_step_to_commands(step))
         return "\n".join(lines)
 
-    def _default_launch_app_lines(self) -> List[str]:
+    def _default_launch_app_lines(self, clear_state: bool) -> List[str]:
         """Standard app start config aligned with project onboarding flow."""
         return [
             "- launchApp:",
-            "    clearState: true",
+            f"    clearState: {'true' if clear_state else 'false'}",
             "    clearKeychain: false",
             "    stopApp: false",
             "    permissions: { all: deny }",
         ]
+
+    def _resolve_flow_clear_state(self, explicit: bool | None, attempt: int) -> bool:
+        if explicit is not None:
+            return explicit
+        # Deterministic runs: always start from clean app state by default.
+        return bool(self.flow_clear_state_default)
 
     def _normalize_step_to_commands(self, step: Dict[str, Any]) -> List[str]:
         """
