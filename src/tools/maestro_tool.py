@@ -51,6 +51,14 @@ class MaestroAutomationTool(BaseTool):
     failure_excerpt_max_chars: int = 4000
     _app_install_done: bool = PrivateAttr(default=False)
     _last_scenario_id: str | None = PrivateAttr(default=None)
+    _note_dir: Path = PrivateAttr(default=None)
+    _debug_snapshots_dir: Path = PrivateAttr(default=None)
+
+    def model_post_init(self, __context: Any) -> None:
+        self._note_dir = self.artifacts_dir / "test_screenshots"
+        self._note_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_snapshots_dir = self.artifacts_dir / "debug_snapshots"
+        self._debug_snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     def _run(
         self,
@@ -196,11 +204,13 @@ class MaestroAutomationTool(BaseTool):
                     ]
                 )
             )
+            snapshot_dir: str | None = None
             if debug_dir:
-                failure_context["debug_artifacts_dir"] = debug_dir
-                if debug_dir not in artifacts:
-                    artifacts.append(debug_dir)
-                debug_context = self._collect_debug_context(debug_dir)
+                debug_context, snapshot_dir = self._collect_debug_context(debug_dir, test_id, attempt)
+                target = snapshot_dir or debug_dir
+                failure_context["debug_artifacts_dir"] = target
+                if target not in artifacts:
+                    artifacts.append(target)
                 if debug_context:
                     failure_context["debug_context"] = debug_context
             response["failure_context"] = failure_context
@@ -564,7 +574,7 @@ class MaestroAutomationTool(BaseTool):
         return f"- takeScreenshot: \"{self._note_screenshot_name(digest)}\""
 
     def _note_screenshots_dir(self) -> Path:
-        return self.artifacts_dir / "test_screenshots"
+        return self._note_dir
 
     def _note_screenshot_name(self, digest: str) -> str:
         # Maestro appends .png automatically; pass path without extension.
@@ -697,25 +707,28 @@ class MaestroAutomationTool(BaseTool):
             return None
         return match.group(1)
 
-    def _collect_debug_context(self, debug_dir: str) -> Dict[str, Any]:
-        """
-        Inline selector hints from Maestro debug files for delegated agents.
-        """
+    def _collect_debug_context(
+        self,
+        debug_dir: str,
+        test_id: str,
+        attempt: int,
+    ) -> tuple[Dict[str, Any], str | None]:
+        """Inline selector hints from Maestro debug files and persist snapshot."""
         root = Path(debug_dir)
         if not root.exists() or not root.is_dir():
-            return {}
+            return {}, None
 
         command_logs = sorted(root.glob("commands-*.json"))
         if not command_logs:
-            return {}
+            return {}, None
 
         latest = command_logs[-1]
         try:
             payload = json.loads(latest.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            return {}
+            return {}, None
         if not isinstance(payload, list):
-            return {}
+            return {}, None
 
         failed_selector = ""
         hierarchy_root: Dict[str, Any] | None = None
@@ -748,7 +761,8 @@ class MaestroAutomationTool(BaseTool):
                     break
 
         if not hierarchy_root:
-            return {"failed_selector": failed_selector} if failed_selector else {}
+            context = {"failed_selector": failed_selector} if failed_selector else {}
+            return context, None
 
         texts = self._extract_ui_text_candidates(hierarchy_root)
         result: Dict[str, Any] = {
@@ -762,7 +776,15 @@ class MaestroAutomationTool(BaseTool):
                 "Use ui_text_candidates as real on-screen labels for tap/assert "
                 "instead of testcase prose."
             )
-        return result
+        snapshot_dir = self._write_debug_snapshot(
+            test_id=test_id,
+            attempt=attempt,
+            hierarchy_root=hierarchy_root,
+            debug_context=result,
+            source_log=latest,
+            maestro_debug_dir=debug_dir,
+        )
+        return result, snapshot_dir
 
     def _extract_ui_text_candidates(self, root: Dict[str, Any]) -> List[str]:
         seen: set[str] = set()
@@ -791,6 +813,38 @@ class MaestroAutomationTool(BaseTool):
 
         walk(root)
         return ordered
+
+    def _write_debug_snapshot(
+        self,
+        test_id: str,
+        attempt: int,
+        hierarchy_root: Dict[str, Any],
+        debug_context: Dict[str, Any],
+        source_log: Path,
+        maestro_debug_dir: str,
+    ) -> str:
+        base = self._debug_snapshots_dir / test_id / f"attempt-{attempt}"
+        shutil.rmtree(base, ignore_errors=True)
+        base.mkdir(parents=True, exist_ok=True)
+        (base / "hierarchy.json").write_text(
+            json.dumps(hierarchy_root, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        context_payload = dict(debug_context)
+        context_payload["captured_at"] = datetime.now(timezone.utc).isoformat()
+        (base / "context.json").write_text(
+            json.dumps(context_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        meta = {
+            "source_log": str(source_log),
+            "maestro_debug_dir": maestro_debug_dir,
+        }
+        (base / "meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return str(base)
 
     def _capture_screenshot(self, test_id: str, attempt: int) -> str | None:
         shots_dir = self.artifacts_dir / "screenshots" / test_id

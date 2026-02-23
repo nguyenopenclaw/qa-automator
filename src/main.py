@@ -15,6 +15,7 @@ from tasks import automate_tests_task, map_appflow_task, parse_inputs_task, summ
 from tools.appflow_tool import AppFlowMemoryTool
 from tools.maestro_tool import MaestroAutomationTool
 from tools.qase_parser import QaseTestParserTool
+from tools.screen_inspector_tool import ScreenInspectorTool
 from tools.state_tracker import AutomationStateTrackerTool
 
 console = Console()
@@ -70,9 +71,10 @@ def run(
     )
     state_tool = AutomationStateTrackerTool(artifacts_dir=output)
     appflow_tool = AppFlowMemoryTool(artifacts_dir=output)
+    screen_tool = ScreenInspectorTool(artifacts_dir=output)
 
     manager = qa_manager_agent(maestro_tool, qase_tool, state_tool)
-    appflow = appflow_specialist_agent(appflow_tool, qase_tool)
+    appflow = appflow_specialist_agent(appflow_tool, qase_tool, screen_tool)
 
     crew = Crew(
         agents=[manager, appflow],

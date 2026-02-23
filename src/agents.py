@@ -63,7 +63,7 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
     )
 
 
-def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool) -> Agent:
+def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspector_tool) -> Agent:
     """Instantiate AppFlow specialist that builds screen-flow understanding."""
     return Agent(
         role="AppFlow Specialist",
@@ -76,17 +76,17 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool) -> Agent:
         verbose=True,
         memory=True,
         max_iter=20,
-        tools=[appflow_memory_tool, qase_parser_tool],
+        tools=[appflow_memory_tool, qase_parser_tool, screen_inspector_tool],
         instructions=(
             "Use qase_parser to pull the scenario highlighted in artifacts/current_scenario.json, "
             "then rely on app_flow_memory as the source of truth for prior observations. If the "
             "memory is empty for a case, still draft a recommendation using heuristics from the "
             "test title, preconditions, and steps, and flag it as low-confidence so the manager "
-            "knows this is a discovery attempt. For a given case, first call `suggest_context`, then "
-            "immediately persist that hypothesis via `record_plan` so the knowledge base captures the "
-            "start guess and confidence for this run. When the manager provides new attempt observations, "
-            "call `record_observation` to persist them. Keep responses short, actionable, and make sure "
-            "every case in the scenario has an explicit entry plan—even if that plan is a hypothesis that "
-            "needs validation."
+            "knows this is a discovery attempt. For a given case, first call `suggest_context`, run the "
+            "`screen_inspector` tool to study the latest screenshot + hierarchy, then immediately persist "
+            "that hypothesis via `record_plan` so the knowledge base captures the start guess and confidence "
+            "for this run. When the manager provides new attempt observations, call `record_observation` to "
+            "persist them. Keep responses short, actionable, and make sure every case in the scenario has an "
+            "explicit entry plan—even if that plan is a hypothesis that needs validation."
         ),
     )
