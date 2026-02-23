@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from agents import appflow_specialist_agent, qa_manager_agent
-from tasks import automate_tests_task, parse_inputs_task, summarize_results_task
+from tasks import automate_tests_task, map_appflow_task, parse_inputs_task, summarize_results_task
 from tools.appflow_tool import AppFlowMemoryTool
 from tools.maestro_tool import MaestroAutomationTool
 from tools.qase_parser import QaseTestParserTool
@@ -63,17 +63,22 @@ def run(
         install_app_once=_env_bool("MAESTRO_INSTALL_APP_ONCE", True),
         reinstall_app_per_scenario=_env_bool("MAESTRO_REINSTALL_APP_PER_SCENARIO", True),
     )
-    qase_tool = QaseTestParserTool(test_cases_path=test_cases, tested_cases_path=tested)
+    qase_tool = QaseTestParserTool(
+        test_cases_path=test_cases,
+        tested_cases_path=tested,
+        artifacts_dir=output,
+    )
     state_tool = AutomationStateTrackerTool(artifacts_dir=output)
     appflow_tool = AppFlowMemoryTool(artifacts_dir=output)
 
     manager = qa_manager_agent(maestro_tool, qase_tool, state_tool)
-    appflow = appflow_specialist_agent(appflow_tool)
+    appflow = appflow_specialist_agent(appflow_tool, qase_tool)
 
     crew = Crew(
         agents=[manager, appflow],
         tasks=[
             parse_inputs_task(manager, str(test_cases), str(tested)),
+            map_appflow_task(appflow, str(output)),
             automate_tests_task(manager, str(app_path), str(output), max_attempts),
             summarize_results_task(manager),
         ],

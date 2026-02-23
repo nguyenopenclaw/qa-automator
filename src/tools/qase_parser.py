@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -28,25 +29,33 @@ class QaseTestParserTool(BaseTool):
 
     test_cases_path: Path
     tested_cases_path: Path
+    artifacts_dir: Path | None = None
     max_cases_per_scenario: int = 5
     target_root_suite: str = "Regression"
     _cases: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
     _tested: List[str] = PrivateAttr(default_factory=list)
     _scenarios: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
     _scenarios_path: Path = PrivateAttr()
+    _current_scenario_path: Path | None = PrivateAttr(default=None)
     _source_hash: str = PrivateAttr(default="")
 
     def model_post_init(self, __context: Any) -> None:
         self._scenarios_path = self.test_cases_path.parent / "scenarios.json"
         self._source_hash = self._compute_source_hash()
+        if self.artifacts_dir is None:
+            self.artifacts_dir = self.test_cases_path.parent / "artifacts"
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self._current_scenario_path = self.artifacts_dir / "current_scenario.json"
         self._cases = self._load_cases()
         self._tested = self._load_tested()
         cached = self._load_cached_scenarios()
         if cached is not None:
             self._scenarios = cached
+            self._write_current_scenario(None)
             return
         self._scenarios = self._build_scenarios()
         self._persist_scenarios()
+        self._write_current_scenario(None)
 
     def _run(self, query: str | None = None) -> Dict[str, Any]:
         """Return scenarios in a context-safe, one-by-one format."""
@@ -65,6 +74,7 @@ class QaseTestParserTool(BaseTool):
             scenario = self._get_scenario_by_id(requested_id, pending_ids)
             if not scenario:
                 return {"found": False, "scenario_id": requested_id}
+            self._write_current_scenario(scenario)
             return {
                 "found": True,
                 "mode": "single_scenario",
@@ -79,6 +89,7 @@ class QaseTestParserTool(BaseTool):
             if self._pending_count(item, pending_ids) > 0
         ]
 
+        self._write_current_scenario(next_scenario)
         return {
             "mode": "single_scenario",
             "total": len(self._cases),
@@ -287,6 +298,19 @@ class QaseTestParserTool(BaseTool):
             "is_onboarding": scenario["is_onboarding"],
             "priority": scenario["priority"],
         }
+
+    def _write_current_scenario(self, scenario: Dict[str, Any] | None) -> None:
+        if not self._current_scenario_path:
+            return
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "scenario": scenario,
+            "scenarios_path": str(self._scenarios_path),
+        }
+        self._current_scenario_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _pending_count(self, scenario: Dict[str, Any], pending_ids: set[str]) -> int:
         case_ids = scenario.get("case_ids", [])

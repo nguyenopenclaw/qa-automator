@@ -4,6 +4,7 @@ Automate mobile test cases defined in Qase by orchestrating [Maestro CLI](https:
 
 ## Features
 - **CrewAI orchestration** with a manager agent coordinating preparation, execution, and reporting tasks.
+- **Dedicated AppFlow specialist** that maps scenario entry points using persistent memory (or heuristics when cold-starting) before automation runs.
 - **Dynamic Maestro CLI runner** that builds per-test flows, executes them, and captures screenshots for state inspection.
 - **State tracker** that records up to 10 attempts per test and marks problematic cases.
 - **Artifact-aware**: Stores logs, flow files, and screenshots under `artifacts/` for debugging.
@@ -72,6 +73,8 @@ Example:
 Qase cases that include the tag **`onboarding`** (case-insensitive) are treated as onboarding\nflows. Every other case is preceded by a Maestro `open --url <DEEPLINK>` call using\n`APP_SKIP_ONBOARDING_DEEPLINK` so automation starts past onboarding screens. If a test\nstill needs onboarding but lacks the tag, add it in Qase or adjust `qase_parser` logic.
 
 ## Output
+- `artifacts/current_scenario.json`: Snapshot of the next scenario all agents must focus on.
+- `artifacts/appflow_plan_<scenario_id>.md`: AppFlow specialist's plan with per-case entry points.
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.
 - `samples/automated/<test_id>.yaml`: Generated Maestro flows (or custom `--automated-dir` path).
 - `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
@@ -80,10 +83,11 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 
 ## Automation workflow
 
-1. The agent performs a naive transformation from each Qase case into a Maestro flow.
-2. It executes the flow immediately via Maestro CLI.
-3. On any failure it captures a screenshot (and logs stdout/stderr) to inspect the current UI state before making adjustments or flagging the case.
-4. Up to 10 attempts are made per case; unresolved items are surfaced as problematic with pointers to the collected artifacts.
+1. **Parse inputs** – the QA Manager calls `qase_parser` which groups cases into scenarios and writes both `scenarios.json` and `artifacts/current_scenario.json`.
+2. **Plan navigation** – the AppFlow specialist reads the current scenario snapshot, queries `qase_parser`/`app_flow_memory`, and emits `artifacts/appflow_plan_<scenario_id>.md`. When memory is empty it still drafts low-confidence hypotheses from test text so automation can begin gathering evidence.
+3. **Automate with Maestro** – the QA Manager refuses to proceed until a full plan exists, then converts each case to a Maestro flow, executes it, and logs screenshots + stdout/stderr for each attempt.
+4. **Inspect & retry** – on failures the manager studies `failure_context`, AppFlow notes, and screenshots to iteratively fix the flow (up to 10 attempts).
+5. **Report** – `automation_report.json` and `summary.md` document final status plus artifact pointers for manual QA follow-up.
 
 ## Project structure
 ```
