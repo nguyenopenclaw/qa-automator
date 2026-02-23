@@ -3,8 +3,10 @@
 Automate mobile test cases defined in Qase by orchestrating [Maestro CLI](https://maestro.mobile.dev/) runs. The **qa-automator** CrewAI project ingests exported test-case JSON, previous execution state, and an application binary path, then iteratively converts each case into Maestro flows. Every test is given up to 10 automation attempts; unsuccessful cases are flagged for human follow-up.
 
 ## Features
-- **CrewAI orchestration** with a manager agent coordinating preparation, execution, and reporting tasks.
+- **4-agent CrewAI orchestration**: `Manager` (strategy), `AppFlow` (navigation context), `Automator` (YAML implementation), `MaestroSenior` (quality gate).
 - **Dedicated AppFlow specialist** that maps scenario entry points using persistent memory (or heuristics when cold-starting) before automation runs.
+- **Dedicated Automator agent** that writes/fixes Maestro YAML and runs retries based on failure diagnostics.
+- **Mandatory MaestroSenior review** before every Maestro run to enforce YAML quality and deterministic assertions.
 - **Screen inspector tool** that lets the AppFlow agent review stored screenshots plus UI hierarchies for each attempt.
 - **Dynamic Maestro CLI runner** that builds per-test flows, executes them, and captures screenshots for state inspection.
 - **State tracker** that records up to 10 attempts per test and marks problematic cases.
@@ -75,6 +77,7 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 
 ## Output
 - `artifacts/current_scenario.json`: Snapshot of the next scenario all agents must focus on.
+- `artifacts/manager_plan.json`: Global plan from `Manager` with scenario priority and handoff notes.
 - `artifacts/appflow_plan_<scenario_id>.md`: AppFlow specialist's plan with per-case entry points.
 - `artifacts/app_flow_memory/state.json`: Persistent AppFlow knowledge base (auto-snapshotted per run).
 - `artifacts/debug_snapshots/<test_id>/attempt-<n>/`: Copies of Maestro hierarchy + context per attempt (consumed by screen_inspector).
@@ -87,10 +90,11 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 ## Automation workflow
 
 1. **Parse inputs** – the QA Manager calls `qase_parser` which groups cases into scenarios and writes both `scenarios.json` and `artifacts/current_scenario.json`.
-2. **Plan navigation** – the AppFlow specialist reads the current scenario snapshot, queries `qase_parser`/`app_flow_memory`, inspects stored screenshots + hierarchies via `screen_inspector`, and emits `artifacts/appflow_plan_<scenario_id>.md`. Every hypothesis is persisted via `app_flow_memory.record_plan`, so `artifacts/app_flow_memory/state.json` grows on each run—even when memory starts empty.
-3. **Automate with Maestro** – the QA Manager refuses to proceed until a full plan exists, then converts each case to a Maestro flow, executes it, and logs screenshots + stdout/stderr for each attempt.
-4. **Inspect & retry** – on failures the manager studies `failure_context`, AppFlow notes, and screenshots to iteratively fix the flow (up to 10 attempts).
-5. **Report** – `automation_report.json` and `summary.md` document final status plus artifact pointers for manual QA follow-up.
+2. **Plan sequence** – `Manager` prioritizes scenarios, captures blockers/dependencies, and saves `artifacts/manager_plan.json` for downstream handoff.
+3. **Plan navigation** – `AppFlow` reads the current scenario snapshot, queries `qase_parser`/`app_flow_memory`, inspects stored screenshots + hierarchies via `screen_inspector`, and emits `artifacts/appflow_plan_<scenario_id>.md`. Every hypothesis is persisted via `app_flow_memory.record_plan`, so `artifacts/app_flow_memory/state.json` grows on each run—even when memory starts empty.
+4. **Automate with Maestro** – `Automator` uses manager + appflow plans, converts each case to Maestro YAML, delegates review to `MaestroSenior`, executes, and logs screenshots + stdout/stderr for each attempt.
+5. **Inspect & retry** – on failures `Automator` studies `failure_context`, AppFlow hints, and screenshots, then rewrites YAML and re-runs (up to 10 attempts).
+6. **Report** – `automation_report.json` and `summary.md` document final status plus artifact pointers for manual QA follow-up.
 
 ## Project structure
 ```

@@ -18,53 +18,76 @@ def _load_maestro_skill() -> str:
     return skill_path.read_text(encoding="utf-8").strip()
 
 
-def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_memory_tool) -> Agent:
-    """Instantiate the manager agent that drives all tasks."""
-    maestro_skill = _load_maestro_skill()
+def qa_manager_agent(qase_parser_tool, state_tracker_tool, appflow_memory_tool) -> Agent:
+    """Instantiate strategic manager that plans automation order."""
     instructions = (
-        "You orchestrate end-to-end automation of Qase test cases via Maestro CLI. "
-        "Always work scenario-by-scenario: request only one pending scenario from qase_parser "
-        "and finish it before moving to another. "
-        "If a test is not flagged as onboarding, first trigger the configured deeplink "
-        "to bypass onboarding screens. Start with a naive Maestro translation, run it, "
-        "and when it fails, inspect returned log excerpts, failure diagnostics, and screenshots "
-        "to reason about the state before adjusting steps. When testcase wording/selectors are in "
-        "a different language than the app UI, treat the screenshot as source of truth and map "
-        "steps to the actual on-screen English selector text/labels before retrying. "
-        "You MUST actively rewrite flow between retries: never resend an unchanged flow after "
-        "element_not_found/assertion_failed. Prefer sending maestro_cli payload with `flow_yaml` "
-        "that contains the updated commands for this attempt. "
-        "Respect the retry ceiling "
-        "(10 attempts unless overridden), request screenshots when state is ambiguous, and "
-        "clearly mark unresolved cases as problematic.\n\n"
-        "Never accept or finalize a testcase using screenshot-only evidence: "
-        "every testcase flow must include explicit assertVisible/assertNotVisible checks "
-        "that validate expected results from the scenario steps. "
-        "Use takeScreenshot only as debugging evidence, not as a pass criterion.\n\n"
-        "Each run processes exactly one scenario but all its cases. Always pass `scenario_id` "
-        "in maestro_cli payload so tooling can perform clean app reinstall per scenario. "
-        "Before drafting a flow for each case, delegate to AppFlow specialist and ask for "
-        "recommended start context/screen for that case. After every attempt (pass/fail), "
-        "you MUST persist outcome via app_flow_memory.record_observation with: test_id, "
-        "scenario_id, status, attempt, location_hint, and failure_cause so the flow map "
-        "improves across runs. IMPORTANT: coworkers may not access local filesystem paths. "
-        "When asking AppFlow specialist for help, include inline evidence from "
-        "`failure_context` (log_excerpt + debug_context.ui_text_candidates + failed_selector) "
-        "directly in your question; do NOT ask the specialist to open local artifact paths.\n\n"
-        "After EACH flow edit iteration (initial draft and every retry), delegate to "
-        "MaestroSenior with the full current YAML and latest failure context (if any). "
-        "Only run maestro_cli after MaestroSenior returns a corrected YAML. Treat this "
-        "as mandatory quality gate to remove obvious YAML/synchronization/selector mistakes.\n\n"
-        "For writing and fixing Maestro flows, you MUST follow this project skill:\n"
-        f"{maestro_skill}"
+        "You are the global planner for QA automation. Build the scenario queue, define "
+        "execution order, and keep the run focused on one scenario at a time. "
+        "Use qase_parser as source of truth for pending scenarios and choose the next best "
+        "scenario by balancing risk, dependencies, and blocked history from state_tracker. "
+        "Produce a concise execution plan that explains why this scenario is next and what "
+        "signals indicate readiness to proceed. "
+        "Do not write Maestro YAML and do not run maestro_cli directly: delegate implementation "
+        "to Automator. Ensure AppFlow and Automator receive clear intent, scenario priority, "
+        "and acceptance expectations. "
+        "When there are repeated blockers, mark them explicitly with remediation hints so "
+        "Automator can either retry with targeted probes or escalate as problematic."
     )
 
     return Agent(
         role="QA Automation Manager",
         goal="Automate every provided Qase test case through Maestro flows",
         backstory=(
-            "Seasoned mobile QA lead comfortable turning high-level test cases into deterministic "
-            "automation flows. Expert at documenting residual risk when scripts stay flaky."
+            "Seasoned QA lead who thinks in execution strategy, scenario dependencies, "
+            "and delivery sequencing across large regression sets."
+        ),
+        allow_delegation=True,
+        verbose=True,
+        memory=True,
+        max_iter=30,
+        tools=[qase_parser_tool, state_tracker_tool, appflow_memory_tool],
+        instructions=instructions,
+    )
+
+
+def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_memory_tool) -> Agent:
+    """Instantiate execution specialist that writes and fixes Maestro YAML."""
+    maestro_skill = _load_maestro_skill()
+    instructions = (
+        "You own YAML implementation for Maestro tests. For each selected scenario and case, "
+        "write flows, execute them, inspect failures, and iteratively fix commands/selectors. "
+        "If a test is not flagged as onboarding, first trigger the configured deeplink to bypass "
+        "onboarding screens. Start with a naive Maestro translation, run it, and when it fails, "
+        "inspect returned log excerpts, failure diagnostics, and screenshots to reason about state "
+        "before adjusting steps. When testcase wording/selectors are in a different language than "
+        "the app UI, treat screenshot and ui_text_candidates as source of truth and map steps to "
+        "actual on-screen English selectors before retrying. "
+        "You MUST actively rewrite flow between retries: never resend unchanged YAML after "
+        "element_not_found/assertion_failed. Prefer maestro_cli payloads with updated `flow_yaml`.\n\n"
+        "Never finalize a testcase using screenshot-only evidence: every flow must include explicit "
+        "assertVisible/assertNotVisible checks validating expected results. Use takeScreenshot only "
+        "as debugging evidence.\n\n"
+        "Each run processes exactly one scenario but all its cases. Always pass `scenario_id` in "
+        "maestro_cli payload so tooling can perform clean app reinstall per scenario. Before drafting "
+        "flow for each case, delegate to AppFlow specialist for recommended start context/screen. "
+        "After every attempt (pass/fail), persist outcome via app_flow_memory.record_observation "
+        "with: test_id, scenario_id, status, attempt, location_hint, and failure_cause. IMPORTANT: "
+        "coworkers may not access local filesystem paths. When asking AppFlow specialist for help, "
+        "include inline evidence from failure_context (log_excerpt + "
+        "debug_context.ui_text_candidates + failed_selector), not local artifact paths.\n\n"
+        "After EACH flow edit iteration (initial draft and every retry), delegate to MaestroSenior "
+        "with full current YAML and latest failure context (if any). Only run maestro_cli after "
+        "MaestroSenior returns corrected YAML. This review is a mandatory quality gate.\n\n"
+        "For writing and fixing Maestro flows, you MUST follow this project skill:\n"
+        f"{maestro_skill}"
+    )
+
+    return Agent(
+        role="Automator",
+        goal="Implement and stabilize Maestro YAML flows for selected scenarios",
+        backstory=(
+            "Hands-on mobile automation engineer focused on turning scenario intent into "
+            "reliable Maestro YAML, with rapid failure-driven iteration."
         ),
         allow_delegation=True,
         verbose=True,

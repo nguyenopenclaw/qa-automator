@@ -1,23 +1,62 @@
 project: qa-automator
 summary: |
-  Manager-style CrewAI project that ingests Qase test cases, replays them
-  via Maestro CLI, and reports problematic scenarios after at most ten
-  automation attempts per test.
+  Multi-agent CrewAI project that ingests Qase test cases, plans scenario
+  sequencing, maps app navigation context, implements Maestro YAML flows,
+  and reports problematic cases after at most ten automation attempts per test.
 
 agents:
   qa_manager:
     role: "QA Automation Manager"
-    goal: "Guarantee every Qase test case is executed via Maestro with deterministic reporting"
+    goal: "Define global automation plan and scenario execution order"
     backstory: |
-      Veteran mobile QA lead who translates plain-language test cases into
-      flow-based automation while respecting retry budgets and highlighting
-      flaky or blocked scripts.
+      Veteran QA lead focused on risk-based planning, dependency management,
+      and clear handoff to execution specialists.
+    max_iter: 30
+    tools:
+      - qase_parser
+      - state_tracker
+      - app_flow_memory
+    allow_delegation: true
+    verbose: true
+
+  appflow_specialist:
+    role: "AppFlow Specialist"
+    goal: "Understand app navigation and recommend current/next screen context"
+    backstory: |
+      Navigation-focused QA analyst who maintains persistent knowledge about
+      scenario entry points, likely current screens, and transition hints.
+    max_iter: 20
+    tools:
+      - app_flow_memory
+      - qase_parser
+      - screen_inspector
+    allow_delegation: false
+    verbose: true
+
+  maestro_senior:
+    role: "MaestroSenior"
+    goal: "Review YAML flows and enforce robust Maestro quality"
+    backstory: |
+      Principal mobile automation engineer specializing in deterministic YAML,
+      resilient selectors, and anti-flakiness review.
+    max_iter: 20
+    tools: []
+    allow_delegation: false
+    verbose: true
+
+  automator:
+    role: "Automator"
+    goal: "Write, run, and iteratively fix Maestro YAML tests"
+    backstory: |
+      Execution-focused automation engineer who turns scenario intent into
+      stable Maestro flows and uses failure feedback to improve retries.
     max_iter: 30
     tools:
       - maestro_cli
       - qase_parser
       - state_tracker
-    allow_delegation: false
+      - app_flow_memory
+    allow_delegation: true
     verbose: true
 
 settings:

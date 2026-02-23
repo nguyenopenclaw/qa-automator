@@ -10,8 +10,14 @@ from crewai import Crew, Process
 from rich.console import Console
 from rich.table import Table
 
-from agents import appflow_specialist_agent, maestro_senior_agent, qa_manager_agent
-from tasks import automate_tests_task, map_appflow_task, parse_inputs_task, summarize_results_task
+from agents import appflow_specialist_agent, automator_agent, maestro_senior_agent, qa_manager_agent
+from tasks import (
+    automate_tests_task,
+    map_appflow_task,
+    parse_inputs_task,
+    plan_automation_sequence_task,
+    summarize_results_task,
+)
 from tools.appflow_tool import AppFlowMemoryTool
 from tools.maestro_tool import MaestroAutomationTool
 from tools.qase_parser import QaseTestParserTool
@@ -74,16 +80,18 @@ def run(
     appflow_tool = AppFlowMemoryTool(artifacts_dir=output)
     screen_tool = ScreenInspectorTool(artifacts_dir=output)
 
-    manager = qa_manager_agent(maestro_tool, qase_tool, state_tool, appflow_tool)
+    manager = qa_manager_agent(qase_tool, state_tool, appflow_tool)
+    automator = automator_agent(maestro_tool, qase_tool, state_tool, appflow_tool)
     appflow = appflow_specialist_agent(appflow_tool, qase_tool, screen_tool)
     maestro_senior = maestro_senior_agent()
 
     crew = Crew(
-        agents=[manager, appflow, maestro_senior],
+        agents=[manager, appflow, maestro_senior, automator],
         tasks=[
             parse_inputs_task(manager, str(test_cases), str(tested)),
+            plan_automation_sequence_task(manager, str(output)),
             map_appflow_task(appflow, str(output)),
-            automate_tests_task(manager, str(app_path), str(output), max_attempts),
+            automate_tests_task(automator, str(app_path), str(output), max_attempts),
             summarize_results_task(manager),
         ],
         process=Process.sequential,
