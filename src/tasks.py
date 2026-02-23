@@ -32,8 +32,9 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
     scenario is queued for automation next. Use qase_parser to fetch the same scenario id so
     you always share context with the QA Manager. For every case in that scenario, call
     `app_flow_memory`'s `suggest_context` to capture best starting screens, confidence, and
-    rationale. Use `screen_inspector` whenever a prior attempt exists to review the latest
-    screenshot plus hierarchy before finalizing guidance. Immediately persist each hypothesis via
+    rationale. Do not call `screen_inspector` during this upfront planning stage; this task runs
+    before active Maestro execution and should rely on memory + scenario semantics only.
+    Immediately persist each hypothesis via
     `app_flow_memory` `record_plan` so the memory file reflects that this run attempted to cover the
     case (even before automation).
     When the memory lacks data, derive a hypothesis from test titles and steps, label it as
