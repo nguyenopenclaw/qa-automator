@@ -59,6 +59,7 @@ PYTHONPATH=src python src/main.py \
 | `MAESTRO_APP_ID` | No | `default` | App ID inserted into generated Maestro YAML flows. |
 | `APP_SKIP_ONBOARDING_DEEPLINK` | No | _(empty)_ | Deep-link opened before non-onboarding tests to skip onboarding. |
 | `MAESTRO_SCREENSHOT_MAX_SIDE_PX` | No | `1440` | Max image side for captured screenshots before attaching to model context. |
+| `MAESTRO_SCREENSHOT_JPEG_QUALITY` | No | `75` | JPEG quality (1-100) used when converting screenshots to reduce size. |
 
 ### Where to set `scenarios.json` path
 
@@ -83,7 +84,7 @@ Qase cases that include the tag **`onboarding`** (case-insensitive) are treated 
 - `artifacts/debug_snapshots/<test_id>/attempt-<n>/`: Copies of Maestro hierarchy + context per attempt (consumed by screen_inspector).
 - `artifacts/automation_report.json`: Execution summary with pass/fail/problem flags.
 - `samples/automated/<test_id>.yaml`: Generated Maestro flows (or custom `--automated-dir` path).
-- `artifacts/screenshots/<test_id>/attempt-*.png`: Captured screens when requested.
+- `artifacts/screenshots/<test_id>/attempt-*.jpg`: Captured screens when requested (converted from PNG to reduce size).
 - `artifacts/logs/<test_id>-attempt-<n>.log`: Maestro stdout/stderr for each attempt.
 - `<test-cases-dir>/scenarios.json`: Auto-generated end-to-end scenarios grouped from Qase cases.
 

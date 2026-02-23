@@ -53,6 +53,7 @@ class MaestroAutomationTool(BaseTool):
     flow_clear_state_default: bool = True
     command_timeout_seconds: int = 120
     screenshot_max_side_px: int = 1440
+    screenshot_jpeg_quality: int = 75
     failure_excerpt_max_chars: int = 4000
     _app_install_done: bool = PrivateAttr(default=False)
     _last_scenario_id: str | None = PrivateAttr(default=None)
@@ -1177,11 +1178,12 @@ class MaestroAutomationTool(BaseTool):
     def _capture_screenshot(self, test_id: str, attempt: int) -> str | None:
         shots_dir = self.artifacts_dir / "screenshots" / test_id
         shots_dir.mkdir(parents=True, exist_ok=True)
-        shot_path = shots_dir / f"attempt-{attempt}.png"
+        shot_path_png = shots_dir / f"attempt-{attempt}.png"
+        shot_path_jpg = shots_dir / f"attempt-{attempt}.jpg"
         cmd = [self.maestro_bin]
         if self.device:
             cmd.extend(["--device", self.device])
-        cmd.extend(["screenshot", str(shot_path)])
+        cmd.extend(["screenshot", str(shot_path_png)])
         try:
             subprocess.run(
                 cmd,
@@ -1189,14 +1191,14 @@ class MaestroAutomationTool(BaseTool):
                 capture_output=True,
                 timeout=self.command_timeout_seconds,
             )
-            self._shrink_screenshot_for_model(shot_path)
-            return str(shot_path)
+            prepared_path = self._optimize_screenshot_for_model(shot_path_png, shot_path_jpg)
+            return str(prepared_path)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
         # Fallback for iOS simulator when Maestro screenshot command is unavailable/flaky.
         target = (self.ios_simulator_target or "booted").strip() or "booted"
-        fallback_cmd = ["xcrun", "simctl", "io", target, "screenshot", str(shot_path)]
+        fallback_cmd = ["xcrun", "simctl", "io", target, "screenshot", str(shot_path_png)]
         try:
             subprocess.run(
                 fallback_cmd,
@@ -1204,34 +1206,59 @@ class MaestroAutomationTool(BaseTool):
                 capture_output=True,
                 timeout=self.command_timeout_seconds,
             )
-            self._shrink_screenshot_for_model(shot_path)
-            return str(shot_path)
+            prepared_path = self._optimize_screenshot_for_model(shot_path_png, shot_path_jpg)
+            return str(prepared_path)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             return None
 
-    def _shrink_screenshot_for_model(self, shot_path: Path) -> None:
-        """Reduce image dimensions before it is attached to model context."""
+    def _optimize_screenshot_for_model(self, source_png_path: Path, target_jpg_path: Path) -> Path:
+        """Resize screenshot and convert to JPG to reduce payload size."""
         try:
             max_side = int(os.getenv("MAESTRO_SCREENSHOT_MAX_SIDE_PX", self.screenshot_max_side_px))
         except ValueError:
             max_side = self.screenshot_max_side_px
-        if max_side <= 0:
-            return
 
         sips_bin = shutil.which("sips")
         if not sips_bin:
-            return
+            return source_png_path
 
         try:
+            quality = int(os.getenv("MAESTRO_SCREENSHOT_JPEG_QUALITY", self.screenshot_jpeg_quality))
+        except ValueError:
+            quality = self.screenshot_jpeg_quality
+        quality = max(1, min(100, quality))
+
+        try:
+            if max_side > 0:
+                subprocess.run(
+                    [sips_bin, "-Z", str(max_side), str(source_png_path)],
+                    check=True,
+                    capture_output=True,
+                    timeout=20,
+                )
             subprocess.run(
-                [sips_bin, "-Z", str(max_side), str(shot_path)],
+                [
+                    sips_bin,
+                    "--setProperty",
+                    "format",
+                    "jpeg",
+                    "--setProperty",
+                    "formatOptions",
+                    str(quality),
+                    str(source_png_path),
+                    "--out",
+                    str(target_jpg_path),
+                ],
                 check=True,
                 capture_output=True,
                 timeout=20,
             )
+            if source_png_path.exists():
+                source_png_path.unlink(missing_ok=True)
+            return target_jpg_path
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-            # Best-effort optimization: keep original screenshot if resize failed.
-            return
+            # Best-effort optimization: keep original screenshot if conversion failed.
+            return source_png_path
 
     def _skip_onboarding_if_possible(self, test_id: str) -> None:
         if not self.skip_onboarding_deeplink:

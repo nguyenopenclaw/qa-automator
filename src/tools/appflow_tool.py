@@ -62,6 +62,14 @@ class AppFlowInput(BaseModel):
         default=None,
         description="Short flow summary stored in flow_*.json.",
     )
+    screenshot_path: str | None = Field(
+        default=None,
+        description="Path to screenshot that confirms the observed screen.",
+    )
+    confirmed: bool | None = Field(
+        default=None,
+        description="Explicit confirmation flag for screen transition evidence.",
+    )
 
 
 class AppFlowMemoryTool(BaseTool):
@@ -152,6 +160,8 @@ class AppFlowMemoryTool(BaseTool):
         flow_description: str | None = None,
         recommended_start: str | None = None,
         confidence: str | None = None,
+        screenshot_path: str | None = None,
+        confirmed: bool | None = None,
     ) -> Dict[str, Any]:
         if action == "suggest_context":
             return self._suggest_context(
@@ -182,6 +192,8 @@ class AppFlowMemoryTool(BaseTool):
                 location_hint=location_hint,
                 failure_cause=failure_cause,
                 notes=notes,
+                screenshot_path=screenshot_path,
+                confirmed=confirmed,
             )
         if action == "record_screen_transition":
             return self._record_screen_transition(
@@ -196,6 +208,8 @@ class AppFlowMemoryTool(BaseTool):
                 status=status,
                 attempt=attempt,
                 notes=notes,
+                screenshot_path=screenshot_path,
+                confirmed=confirmed,
             )
         if action == "summary":
             return self._summary()
@@ -404,6 +418,8 @@ class AppFlowMemoryTool(BaseTool):
         location_hint: str | None,
         failure_cause: str | None,
         notes: str | None,
+        screenshot_path: str | None,
+        confirmed: bool | None,
     ) -> Dict[str, Any]:
         if not test_id:
             raise ValueError("record_observation requires test_id")
@@ -503,7 +519,11 @@ class AppFlowMemoryTool(BaseTool):
 
         self._state["updated_at"] = now
         self._write()
-        graph_event = self._extract_graph_event(location_hint=location_hint, notes=notes)
+        graph_event = self._extract_graph_event(
+            location_hint=location_hint,
+            notes=notes,
+            screenshot_path=screenshot_path,
+        )
         if graph_event:
             self._record_screen_transition(
                 test_id=test_id,
@@ -517,6 +537,8 @@ class AppFlowMemoryTool(BaseTool):
                 status=status_lower,
                 attempt=attempt,
                 notes=notes,
+                screenshot_path=graph_event.get("screenshot_path"),
+                confirmed=confirmed,
                 strict=False,
             )
         return {
@@ -574,7 +596,10 @@ class AppFlowMemoryTool(BaseTool):
         return self._state.get("cases", {}).get(test_id)
 
     def _collect_flow_hints(self, test_id: str | None, scenario_id: str | None) -> Dict[str, Any]:
-        flow_key = self._flow_key(flow_id=None, scenario_id=scenario_id, test_id=test_id)
+        del test_id
+        flow_key = self._flow_key(flow_id=None, scenario_id=scenario_id, test_id=None)
+        if not flow_key:
+            return {}
         flow_id = str(self._graph_catalog.get("flows_by_key", {}).get(flow_key, ""))
         if not flow_id:
             return {}
@@ -736,6 +761,8 @@ class AppFlowMemoryTool(BaseTool):
         status: str | None,
         attempt: int | None,
         notes: str | None,
+        screenshot_path: str | None = None,
+        confirmed: bool | None = None,
         strict: bool = True,
     ) -> Dict[str, Any]:
         if not test_id and strict:
@@ -746,12 +773,29 @@ class AppFlowMemoryTool(BaseTool):
             return {}
 
         now = datetime.now(timezone.utc).isoformat()
+        resolved_screenshot = self._resolve_screenshot_path(screenshot_path)
+        if not self._is_confirmed_graph_event(
+            status=status,
+            confirmed=confirmed,
+            screenshot_path=resolved_screenshot,
+        ):
+            return {
+                "ok": False,
+                "skipped": "unconfirmed_transition",
+                "reason": "requires passed status, valid screenshot_path, and confirmed != false",
+            }
+
+        source_name = str(current_screen or "").strip()
+        target_name = str(next_screen or "").strip()
+        source_screenshot = resolved_screenshot if source_name else ""
+        target_screenshot = resolved_screenshot if (not source_screenshot and target_name) else ""
         source_id = self._upsert_screen(
             screen_name=current_screen,
             elements=elements,
             status=status,
             attempt=attempt,
             seen_at=now,
+            screenshot_path=source_screenshot,
         )
         target_id = self._upsert_screen(
             screen_name=next_screen,
@@ -759,6 +803,7 @@ class AppFlowMemoryTool(BaseTool):
             status=status,
             attempt=attempt,
             seen_at=now,
+            screenshot_path=target_screenshot,
         )
         if source_id and target_id:
             self._add_screen_transition(
@@ -768,17 +813,19 @@ class AppFlowMemoryTool(BaseTool):
                 seen_at=now,
             )
 
+        flow_file_id = ""
         flow_key = self._flow_key(flow_id=flow_id, scenario_id=scenario_id, test_id=test_id)
-        flow_file_id = self._upsert_flow(
-            flow_key=flow_key,
-            scenario_id=scenario_id,
-            flow_description=flow_description,
-            source_id=source_id,
-            target_id=target_id,
-            via=action_hint,
-            test_id=test_id,
-            seen_at=now,
-        )
+        if flow_key:
+            flow_file_id = self._upsert_flow(
+                flow_key=flow_key,
+                scenario_id=scenario_id,
+                flow_description=flow_description,
+                source_id=source_id,
+                target_id=target_id,
+                via=action_hint,
+                test_id=test_id,
+                seen_at=now,
+            )
         self._graph_catalog["updated_at"] = now
         self._write_graph_catalog()
         return {
@@ -790,6 +837,7 @@ class AppFlowMemoryTool(BaseTool):
             "target_screen_id": target_id,
             "source_screen": current_screen or "",
             "target_screen": next_screen or "",
+            "screenshot_path": resolved_screenshot,
         }
 
     def _upsert_screen(
@@ -799,6 +847,7 @@ class AppFlowMemoryTool(BaseTool):
         status: str | None,
         attempt: int | None,
         seen_at: str,
+        screenshot_path: str | None,
     ) -> str:
         normalized_name = str(screen_name or "").strip()
         if not normalized_name:
@@ -812,6 +861,9 @@ class AppFlowMemoryTool(BaseTool):
         else:
             next_seq = int(self._graph_catalog.get("next_screen_seq", 1) or 1)
             screen_id = f"screen_{next_seq:03d}"
+            while self._screen_path(screen_id).exists():
+                next_seq += 1
+                screen_id = f"screen_{next_seq:03d}"
             self._graph_catalog["next_screen_seq"] = next_seq + 1
             screens_by_key[key] = screen_id
 
@@ -829,6 +881,8 @@ class AppFlowMemoryTool(BaseTool):
                     "failed_count": 0,
                     "attempt_max": 0,
                 },
+                "latest_screenshot": "",
+                "screenshots": [],
                 "last_seen_at": "",
             }
         aliases = payload.setdefault("aliases", [])
@@ -865,6 +919,27 @@ class AppFlowMemoryTool(BaseTool):
         if attempt and int(attempt) > int(stats.get("attempt_max", 0) or 0):
             stats["attempt_max"] = int(attempt)
         payload["stats"] = stats
+        payload.setdefault("latest_screenshot", "")
+        screenshots = payload.get("screenshots", [])
+        if not isinstance(screenshots, list):
+            screenshots = []
+        if screenshot_path:
+            known_shots = {
+                str(item.get("path"))
+                for item in screenshots
+                if isinstance(item, dict) and str(item.get("path", "")).strip()
+            }
+            if screenshot_path not in known_shots:
+                screenshots.append(
+                    {
+                        "path": screenshot_path,
+                        "seen_at": seen_at,
+                        "attempt": int(attempt) if isinstance(attempt, int) else None,
+                        "status": status_lower or "unknown",
+                    }
+                )
+            payload["latest_screenshot"] = screenshot_path
+        payload["screenshots"] = screenshots[-20:]
         payload["last_seen_at"] = seen_at
         self._write_graph_file(self._screen_path(screen_id), payload)
         return screen_id
@@ -928,6 +1003,9 @@ class AppFlowMemoryTool(BaseTool):
         else:
             next_seq = int(self._graph_catalog.get("next_flow_seq", 1) or 1)
             flow_id = f"flow_{next_seq:03d}"
+            while self._flow_path(flow_id).exists():
+                next_seq += 1
+                flow_id = f"flow_{next_seq:03d}"
             self._graph_catalog["next_flow_seq"] = next_seq + 1
             flows_by_key[flow_key] = flow_id
 
@@ -1040,6 +1118,7 @@ class AppFlowMemoryTool(BaseTool):
         notes: str | None,
         flow_id: str | None = None,
         flow_description: str | None = None,
+        screenshot_path: str | None = None,
     ) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "current_screen": str(location_hint or "").strip(),
@@ -1048,6 +1127,7 @@ class AppFlowMemoryTool(BaseTool):
             "elements": [],
             "flow_id": flow_id or "",
             "flow_description": flow_description or "",
+            "screenshot_path": self._resolve_screenshot_path(screenshot_path),
         }
         if not notes:
             return result if result["current_screen"] else {}
@@ -1081,6 +1161,18 @@ class AppFlowMemoryTool(BaseTool):
             result["flow_description"] = str(
                 parsed.get("flow_description") or parsed.get("description") or ""
             ).strip()
+        if not result["screenshot_path"]:
+            result["screenshot_path"] = self._resolve_screenshot_path(
+                parsed.get("screenshot_path") or parsed.get("screenshot") or ""
+            )
+        if not result["screenshot_path"]:
+            artifacts = parsed.get("artifacts")
+            if isinstance(artifacts, list):
+                for item in artifacts:
+                    resolved = self._resolve_screenshot_path(item)
+                    if resolved:
+                        result["screenshot_path"] = resolved
+                        break
         navigation_context = parsed.get("navigation_context")
         if isinstance(navigation_context, dict):
             if not result["current_screen"]:
@@ -1123,14 +1215,10 @@ class AppFlowMemoryTool(BaseTool):
         return re.sub(r"\s+", " ", raw)
 
     def _flow_key(self, flow_id: str | None, scenario_id: str | None, test_id: str | None) -> str:
-        explicit = str(flow_id or "").strip()
-        if explicit:
-            return f"flow:{explicit}"
+        del flow_id, test_id
         if scenario_id:
             return f"scenario:{scenario_id}"
-        if test_id:
-            return f"case:{test_id}"
-        return "flow:unknown"
+        return ""
 
     def _screen_path(self, screen_id: str) -> Path:
         return self._screens_dir / f"{screen_id}.json"
@@ -1160,6 +1248,7 @@ class AppFlowMemoryTool(BaseTool):
             "flows_by_key": {},
         }
         if not self._graph_catalog_path.exists():
+            self._reconcile_graph_catalog()
             return
         try:
             raw = json.loads(self._graph_catalog_path.read_text(encoding="utf-8"))
@@ -1176,10 +1265,77 @@ class AppFlowMemoryTool(BaseTool):
             self._graph_catalog["screens_by_key"] = {str(k): str(v) for k, v in screens.items()}
         if isinstance(flows, dict):
             self._graph_catalog["flows_by_key"] = {str(k): str(v) for k, v in flows.items()}
+        self._reconcile_graph_catalog()
 
     def _write_graph_catalog(self) -> None:
         payload = json.dumps(self._graph_catalog, ensure_ascii=False, indent=2)
         self._graph_catalog_path.write_text(payload, encoding="utf-8")
+
+    def _reconcile_graph_catalog(self) -> None:
+        screens_by_key = self._graph_catalog.setdefault("screens_by_key", {})
+        flows_by_key = self._graph_catalog.setdefault("flows_by_key", {})
+        if not isinstance(screens_by_key, dict):
+            screens_by_key = {}
+            self._graph_catalog["screens_by_key"] = screens_by_key
+        if not isinstance(flows_by_key, dict):
+            flows_by_key = {}
+            self._graph_catalog["flows_by_key"] = flows_by_key
+
+        max_screen_seq = 0
+        for screen_path in sorted(self._screens_dir.glob("screen_*.json")):
+            payload = self._read_graph_file(screen_path)
+            screen_id = str(payload.get("screen_id") or screen_path.stem)
+            seq_match = re.fullmatch(r"screen_(\d+)", screen_id)
+            if seq_match:
+                max_screen_seq = max(max_screen_seq, int(seq_match.group(1)))
+            name = str(payload.get("name") or "").strip()
+            key = self._normalize_screen_key(name)
+            if key and key not in screens_by_key:
+                screens_by_key[key] = screen_id
+
+        max_flow_seq = 0
+        for flow_path in sorted(self._flows_dir.glob("flow_*.json")):
+            payload = self._read_graph_file(flow_path)
+            flow_id = str(payload.get("flow_id") or flow_path.stem)
+            seq_match = re.fullmatch(r"flow_(\d+)", flow_id)
+            if seq_match:
+                max_flow_seq = max(max_flow_seq, int(seq_match.group(1)))
+            scenario_id = str(payload.get("scenario_id") or "").strip()
+            flow_key = f"scenario:{scenario_id}" if scenario_id else ""
+            if flow_key and flow_key not in flows_by_key:
+                flows_by_key[flow_key] = flow_id
+
+        self._graph_catalog["next_screen_seq"] = max(
+            int(self._graph_catalog.get("next_screen_seq", 1) or 1),
+            max_screen_seq + 1,
+        )
+        self._graph_catalog["next_flow_seq"] = max(
+            int(self._graph_catalog.get("next_flow_seq", 1) or 1),
+            max_flow_seq + 1,
+        )
+
+    def _resolve_screenshot_path(self, raw_path: Any) -> str:
+        candidate = str(raw_path or "").strip()
+        if not candidate:
+            return ""
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = (self.artifacts_dir / path).resolve()
+        if not path.exists() or not path.is_file():
+            return ""
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return ""
+        return str(path)
+
+    def _is_confirmed_graph_event(
+        self,
+        status: str | None,
+        confirmed: bool | None,
+        screenshot_path: str | None,
+    ) -> bool:
+        status_lower = str(status or "").strip().lower()
+        confirmation_flag = confirmed is not False
+        return status_lower == "passed" and confirmation_flag and bool(screenshot_path)
 
     def _load_detail_catalog(self) -> None:
         self._detail_catalog = {

@@ -62,8 +62,8 @@ class ScreenInspectorTool(BaseTool):
         attempts = {}
         shots_path = self._screens_dir / test_id
         if shots_path.exists():
-            for file in shots_path.glob("attempt-*.png"):
-                match = re.search(r"attempt-(\d+)\.png", file.name)
+            for file in shots_path.glob("attempt-*.*"):
+                match = re.search(r"attempt-(\d+)\.(png|jpe?g)$", file.name, flags=re.IGNORECASE)
                 if not match:
                     continue
                 attempts.setdefault(int(match.group(1)), {})["screenshot"] = str(file)

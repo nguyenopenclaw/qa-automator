@@ -45,9 +45,9 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
 
     Persist structured AppFlow outputs:
     - screen graph files in `{artifacts_dir}/app_flow_memory/screens/screen_*.json`
-      (elements + transitions),
+      (elements + transitions + screenshot evidence per screen),
     - flow files in `{artifacts_dir}/app_flow_memory/flows/flow_*.json`
-      (screen chain references + short descriptions),
+      (screen chain references + short descriptions, strictly 1 flow per scenario),
     - consolidated scenario plan in `{artifacts_dir}/appflow_plan_<scenario_id>.json`.
     Ensure every case has explicit entry hypothesis and is linked to known/expected screens.
     """
@@ -116,8 +116,10 @@ def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: 
        last_successful_step_index, retry_from_step_index, navigation_context), share inline evidence with AppFlow,
        rewrite YAML from the failure point forward, and keep already validated prefix steps.
     6) After each attempt, record AppFlow observation: item id (`test_id`), scenario id, status,
-       location_hint, and failure_cause. Use `navigation_context.current_screen` as location_hint
-       (fallback `from_screen`) and include full navigation JSON in notes.
+       location_hint, failure_cause, screenshot_path, and confirmed flag. Use
+       `navigation_context.current_screen` as location_hint (fallback `from_screen`), include full
+       navigation JSON + artifacts in notes, and set confirmed=true only for passed attempts with
+       existing screenshot evidence.
 
     Quality constraints:
     - Always capture screenshot on failed runs.
