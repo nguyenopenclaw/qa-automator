@@ -39,7 +39,10 @@ def qa_manager_agent(maestro_tool, qase_parser_tool, state_tracker_tool) -> Agen
         "Before drafting a flow for each case, delegate to AppFlow specialist and ask for "
         "recommended start context/screen for that case. After each attempt (pass/fail), "
         "send the observed location and failure cause back to AppFlow so its flow map "
-        "improves across runs.\n\n"
+        "improves across runs. IMPORTANT: coworkers may not access local filesystem paths. "
+        "When asking AppFlow specialist for help, include inline evidence from "
+        "`failure_context` (log_excerpt + debug_context.ui_text_candidates + failed_selector) "
+        "directly in your question; do NOT ask the specialist to open local artifact paths.\n\n"
         "For writing and fixing Maestro flows, you MUST follow this project skill:\n"
         f"{maestro_skill}"
     )

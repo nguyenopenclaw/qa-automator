@@ -181,12 +181,29 @@ class MaestroAutomationTool(BaseTool):
             if shot:
                 artifacts.append(shot)
         if status == "failed":
-            response["failure_context"] = self._build_failure_context(
+            failure_context = self._build_failure_context(
                 stdout=result.stdout,
                 stderr=result.stderr,
                 log_file=log_file,
             )
-            response["error"] = response["failure_context"].get("cause")
+            debug_dir = self._extract_maestro_debug_dir(
+                "\n".join(
+                    [
+                        result.stdout or "",
+                        result.stderr or "",
+                        log_file.read_text(encoding="utf-8"),
+                    ]
+                )
+            )
+            if debug_dir:
+                failure_context["debug_artifacts_dir"] = debug_dir
+                if debug_dir not in artifacts:
+                    artifacts.append(debug_dir)
+                debug_context = self._collect_debug_context(debug_dir)
+                if debug_context:
+                    failure_context["debug_context"] = debug_context
+            response["failure_context"] = failure_context
+            response["error"] = failure_context.get("cause")
 
         return response
 
@@ -462,6 +479,10 @@ class MaestroAutomationTool(BaseTool):
 
         # If upstream already provided a known Maestro command, keep it.
         if raw_action in supported:
+            if raw_action in {"assertVisible", "assertNotVisible"}:
+                payload_text = str(raw_payload or "").strip()
+                if self._is_placeholder_assertion(payload_text):
+                    return [self._render_comment(f"placeholder assertion skipped: {payload_text}")]
             rendered = self._render_command(raw_action, raw_payload)
             if rendered:
                 cmds.append(rendered)
@@ -494,7 +515,10 @@ class MaestroAutomationTool(BaseTool):
         elif any(token in raw_action_lower for token in ("открыт", "экран", "переход")):
             # State-like prose usually describes expected screen; make it explicit.
             if candidate:
-                cmds.append(self._render_command("assertVisible", candidate))
+                if not self._is_placeholder_assertion(candidate):
+                    cmds.append(self._render_command("assertVisible", candidate))
+                else:
+                    cmds.append(self._render_comment(f"screen assertion unresolved: {candidate}"))
             else:
                 first_line = self._first_non_empty_line(raw_action)
                 if first_line:
@@ -505,7 +529,18 @@ class MaestroAutomationTool(BaseTool):
 
         # Promote compact expected_result to assertion when practical.
         expected_line = self._first_non_empty_line(expected_result)
-        if expected_line and len(expected_line) <= 120:
+        expected_quoted = self._extract_quoted_text(expected_result)
+        expected_candidate = expected_quoted[0] if expected_quoted else self._extract_parenthesized_text(
+            expected_result
+        )
+        if expected_candidate and not self._is_placeholder_assertion(expected_candidate):
+            cmds.append(self._render_command("assertVisible", expected_candidate))
+        elif (
+            expected_line
+            and len(expected_line) <= 120
+            and len(expected_line.split()) <= 8
+            and not self._is_placeholder_assertion(expected_line)
+        ):
             cmds.append(self._render_command("assertVisible", expected_line))
         elif expected_line:
             cmds.append(self._render_comment(f"expected: {expected_line[:200]}"))
@@ -526,6 +561,42 @@ class MaestroAutomationTool(BaseTool):
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
         # Some Maestro versions do not support `comment`; use deterministic evidence capture instead.
         return f"- takeScreenshot: \"note-{digest}\""
+
+    def _is_placeholder_assertion(self, text: str) -> bool:
+        normalized = str(text or "").strip().lower()
+        if not normalized:
+            return True
+
+        exact_placeholders = {
+            "app launched",
+            "screenshot captured",
+            "onboarding quiz visible",
+            "quiz q2 visible",
+            "quiz q3 visible",
+            "screen visible",
+        }
+        if normalized in exact_placeholders:
+            return True
+
+        prefix_placeholders = (
+            "открыт ",
+            "открыта ",
+            "открыто ",
+            "переключение на экран",
+            "отображается экран",
+            "пройти онбординг",
+            "тап на ",
+            "tap ",
+            "launch ",
+        )
+        if any(normalized.startswith(prefix) for prefix in prefix_placeholders):
+            return True
+
+        # Treat long prose-like checks as unstable selectors.
+        if "\n" in normalized or len(normalized.split()) > 10:
+            return True
+
+        return False
 
     def _extract_quoted_text(self, source: str) -> List[str]:
         if not source:
@@ -558,7 +629,7 @@ class MaestroAutomationTool(BaseTool):
             return "Back"
         return None
 
-    def _build_failure_context(self, stdout: str, stderr: str, log_file: Path) -> Dict[str, str]:
+    def _build_failure_context(self, stdout: str, stderr: str, log_file: Path) -> Dict[str, Any]:
         """Return compact diagnostics so the agent can fix flow on next retry."""
         combined = "\n".join(part for part in [stdout, stderr] if part).strip()
         lower = combined.lower()
@@ -610,6 +681,109 @@ class MaestroAutomationTool(BaseTool):
             return content
         return content[-max_chars:]
 
+    def _extract_maestro_debug_dir(self, content: str) -> str | None:
+        if not content:
+            return None
+        match = re.search(r"(/[^\s]*\.maestro/tests/[^\s]+)", content)
+        if not match:
+            return None
+        return match.group(1)
+
+    def _collect_debug_context(self, debug_dir: str) -> Dict[str, Any]:
+        """
+        Inline selector hints from Maestro debug files for delegated agents.
+        """
+        root = Path(debug_dir)
+        if not root.exists() or not root.is_dir():
+            return {}
+
+        command_logs = sorted(root.glob("commands-*.json"))
+        if not command_logs:
+            return {}
+
+        latest = command_logs[-1]
+        try:
+            payload = json.loads(latest.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(payload, list):
+            return {}
+
+        failed_selector = ""
+        hierarchy_root: Dict[str, Any] | None = None
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata")
+            if not isinstance(metadata, dict) or metadata.get("status") != "FAILED":
+                continue
+
+            command = item.get("command")
+            if isinstance(command, dict):
+                tap = command.get("tapOnElement")
+                if isinstance(tap, dict):
+                    selector = tap.get("selector")
+                    if isinstance(selector, dict):
+                        failed_selector = str(
+                            selector.get("textRegex")
+                            or selector.get("text")
+                            or selector.get("idRegex")
+                            or selector.get("id")
+                            or ""
+                        ).strip()
+
+            error = metadata.get("error")
+            if isinstance(error, dict):
+                root_candidate = error.get("hierarchyRoot")
+                if isinstance(root_candidate, dict):
+                    hierarchy_root = root_candidate
+                    break
+
+        if not hierarchy_root:
+            return {"failed_selector": failed_selector} if failed_selector else {}
+
+        texts = self._extract_ui_text_candidates(hierarchy_root)
+        result: Dict[str, Any] = {
+            "source": str(latest),
+            "ui_text_candidates": texts[:20],
+        }
+        if failed_selector:
+            result["failed_selector"] = failed_selector
+        if texts:
+            result["hint"] = (
+                "Use ui_text_candidates as real on-screen labels for tap/assert "
+                "instead of testcase prose."
+            )
+        return result
+
+    def _extract_ui_text_candidates(self, root: Dict[str, Any]) -> List[str]:
+        seen: set[str] = set()
+        ordered: List[str] = []
+
+        def walk(node: Any) -> None:
+            if not isinstance(node, dict):
+                return
+            attrs = node.get("attributes")
+            if isinstance(attrs, dict):
+                for key in ("accessibilityText", "text", "label", "value"):
+                    raw = attrs.get(key)
+                    value = str(raw or "").strip()
+                    if not value:
+                        continue
+                    low = value.lower()
+                    if len(value) > 90 or len(low.split()) > 10:
+                        continue
+                    if low not in seen:
+                        seen.add(low)
+                        ordered.append(value)
+            children = node.get("children")
+            if isinstance(children, list):
+                for child in children:
+                    walk(child)
+
+        walk(root)
+        return ordered
+
     def _capture_screenshot(self, test_id: str, attempt: int) -> str | None:
         shots_dir = self.artifacts_dir / "screenshots" / test_id
         shots_dir.mkdir(parents=True, exist_ok=True)
@@ -621,6 +795,21 @@ class MaestroAutomationTool(BaseTool):
         try:
             subprocess.run(
                 cmd,
+                check=True,
+                capture_output=True,
+                timeout=self.command_timeout_seconds,
+            )
+            self._shrink_screenshot_for_model(shot_path)
+            return str(shot_path)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+        # Fallback for iOS simulator when Maestro screenshot command is unavailable/flaky.
+        target = (self.ios_simulator_target or "booted").strip() or "booted"
+        fallback_cmd = ["xcrun", "simctl", "io", target, "screenshot", str(shot_path)]
+        try:
+            subprocess.run(
+                fallback_cmd,
                 check=True,
                 capture_output=True,
                 timeout=self.command_timeout_seconds,
