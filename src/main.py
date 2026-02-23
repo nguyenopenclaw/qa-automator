@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import typer
 from crewai import Crew, Process
@@ -20,7 +21,6 @@ from agents import (
 )
 from tasks import (
     automate_tests_task,
-    maestro_quality_gate_task,
     map_appflow_task,
     parse_inputs_task,
     plan_automation_sequence_task,
@@ -47,6 +47,23 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _extract_custom_scenario_id(custom_scenario_path: Path) -> str:
+    payload: Any = json.loads(custom_scenario_path.read_text(encoding="utf-8"))
+    scenario_obj = payload.get("scenario") if isinstance(payload, dict) else None
+    if isinstance(scenario_obj, dict):
+        scenario_id = scenario_obj.get("id")
+    elif isinstance(payload, dict):
+        scenario_id = payload.get("id")
+    else:
+        scenario_id = None
+    if not scenario_id:
+        raise typer.BadParameter(
+            "Custom scenario JSON must contain `id` or `scenario.id`.",
+            param_hint="--custom-scenario",
+        )
+    return str(scenario_id)
+
+
 @app.command()
 def run(
     test_cases: Path = typer.Option(..., exists=True, help="Qase JSON export"),
@@ -58,11 +75,27 @@ def run(
         help="Directory where generated Maestro tests (.yaml) are stored",
     ),
     max_attempts: int = typer.Option(10, min=1, max=10, help="Attempts per test"),
+    scenario_id: str | None = typer.Option(
+        None,
+        help="Force manager to run a specific pending scenario id",
+    ),
+    custom_scenario: Path | None = typer.Option(
+        None,
+        exists=True,
+        help=(
+            "Path to custom scenario JSON. Supports either `{...scenario...}` or "
+            "`{\"scenario\": {...}}` shape."
+        ),
+    ),
 ):
     """Execute the crew end-to-end."""
     _ensure_dir(output)
     _ensure_dir(output / "screenshots")
     _ensure_dir(automated_dir)
+
+    custom_scenario_id: str | None = None
+    if custom_scenario:
+        custom_scenario_id = _extract_custom_scenario_id(custom_scenario)
 
     maestro_tool = MaestroAutomationTool(
         app_path=app_path,
@@ -83,6 +116,7 @@ def run(
         test_cases_path=test_cases,
         tested_cases_path=tested,
         artifacts_dir=output,
+        custom_scenario_path=custom_scenario,
     )
     state_tool = AutomationStateTrackerTool(artifacts_dir=output)
     appflow_tool = AppFlowMemoryTool(artifacts_dir=output)
@@ -95,13 +129,14 @@ def run(
     maestro_senior = maestro_senior_agent()
     reporter = reporter_agent(state_tool, appflow_tool)
 
+    selected_scenario_id = custom_scenario_id or scenario_id
+
     crew = Crew(
         agents=[manager, appflow, explorer, maestro_senior, automator, reporter],
         tasks=[
             parse_inputs_task(manager, str(test_cases), str(tested)),
-            plan_automation_sequence_task(manager, str(output)),
+            plan_automation_sequence_task(manager, str(output), selected_scenario_id),
             map_appflow_task(appflow, str(output)),
-            maestro_quality_gate_task(maestro_senior),
             automate_tests_task(automator, str(app_path), str(output), max_attempts),
             summarize_results_task(reporter),
         ],

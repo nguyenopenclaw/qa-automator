@@ -69,32 +69,20 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
     )
 
 
-def maestro_quality_gate_task(agent) -> Task:
-    description = """
-    Produce a strict Maestro quality gate checklist for the upcoming automation run.
-    Use upstream manager/appflow handoff context and return compact, executable guardrails:
-    - YAML validity requirements,
-    - deterministic selector strategy,
-    - synchronization requirements before interactions/assertions,
-    - retry/edit rules after failure (what must change vs what must stay intact),
-    - explicit pass/fail assertion expectations.
-
-    This gate is mandatory and must be consumed by Automator before execution.
+def plan_automation_sequence_task(
+    agent,
+    artifacts_dir: str,
+    selected_scenario_id: str | None = None,
+) -> Task:
+    scenario_override_block = ""
+    if selected_scenario_id:
+        scenario_override_block = f"""
+    User-specified scenario override (mandatory):
+    - Force `selected_scenario_id_for_this_run` to `{selected_scenario_id}`.
+    - Validate the scenario exists in pending scenarios from qase_parser.
+    - If the scenario is missing or already completed, stop and report a blocking error.
     """
 
-    expected_output = (
-        "Compact mandatory Maestro quality checklist ready for Automator to apply in the next task."
-    )
-
-    return Task(
-        name="Define Maestro quality gate",
-        description=description,
-        expected_output=expected_output,
-        agent=agent,
-    )
-
-
-def plan_automation_sequence_task(agent, artifacts_dir: str) -> Task:
     description = f"""
     Build the global execution plan before YAML implementation starts.
 
@@ -109,6 +97,7 @@ def plan_automation_sequence_task(agent, artifacts_dir: str) -> Task:
     - selected_scenario_id_for_this_run,
     - dependencies_or_known_blockers,
     - handoff_notes_for_appflow_and_automator.
+    {scenario_override_block}
     Keep output compact, explicit, and immediately executable by downstream agents.
     """
 

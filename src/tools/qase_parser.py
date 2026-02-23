@@ -30,6 +30,7 @@ class QaseTestParserTool(BaseTool):
     test_cases_path: Path
     tested_cases_path: Path
     artifacts_dir: Path | None = None
+    custom_scenario_path: Path | None = None
     max_cases_per_scenario: int = 5
     target_root_suite: str = "Regression"
     _cases: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
@@ -48,12 +49,19 @@ class QaseTestParserTool(BaseTool):
         self._current_scenario_path = self.artifacts_dir / "current_scenario.json"
         self._cases = self._load_cases()
         self._tested = self._load_tested()
+        custom_scenario = self._load_custom_scenario()
+        if custom_scenario:
+            self._inject_custom_cases(custom_scenario)
         cached = self._load_cached_scenarios()
         if cached is not None:
             self._scenarios = cached
+            if custom_scenario:
+                self._upsert_custom_scenario(custom_scenario)
             self._write_current_scenario(None)
             return
         self._scenarios = self._build_scenarios()
+        if custom_scenario:
+            self._upsert_custom_scenario(custom_scenario)
         self._persist_scenarios()
         self._write_current_scenario(None)
 
@@ -167,6 +175,74 @@ class QaseTestParserTool(BaseTool):
 
             return collected
         return []
+
+    def _load_custom_scenario(self) -> Dict[str, Any] | None:
+        if not self.custom_scenario_path:
+            return None
+        if not self.custom_scenario_path.exists():
+            return None
+        raw_payload = json.loads(self.custom_scenario_path.read_text(encoding="utf-8"))
+        scenario = (
+            raw_payload.get("scenario")
+            if isinstance(raw_payload, dict) and isinstance(raw_payload.get("scenario"), dict)
+            else raw_payload
+        )
+        if not isinstance(scenario, dict):
+            raise ValueError("Custom scenario payload must be a JSON object.")
+        scenario_id = str(scenario.get("id", "")).strip()
+        if not scenario_id:
+            raise ValueError("Custom scenario requires non-empty `id`.")
+        cases_raw = scenario.get("cases")
+        if not isinstance(cases_raw, list) or not cases_raw:
+            raise ValueError("Custom scenario requires non-empty `cases` list.")
+        normalized_cases: List[Dict[str, Any]] = []
+        for index, case in enumerate(cases_raw, start=1):
+            if not isinstance(case, dict):
+                continue
+            case_id = str(case.get("id") or f"{scenario_id}_case_{index:03d}")
+            steps = case.get("steps") if isinstance(case.get("steps"), list) else []
+            normalized_cases.append(
+                {
+                    "id": case_id,
+                    "title": str(case.get("title", f"Custom case {index}")),
+                    "priority": str(case.get("priority", scenario.get("priority", "high"))),
+                    "preconditions": case.get("preconditions", ""),
+                    "postconditions": case.get("postconditions", ""),
+                    "steps": steps,
+                    "tags": case.get("tags") if isinstance(case.get("tags"), list) else [],
+                    "is_onboarding": bool(case.get("is_onboarding", scenario.get("is_onboarding", False))),
+                    "suite_path": str(case.get("suite_path", "Custom / User Scenario")),
+                }
+            )
+        if not normalized_cases:
+            raise ValueError("Custom scenario has no valid case objects.")
+        return {
+            "id": scenario_id,
+            "title": str(scenario.get("title", "Custom user scenario")),
+            "priority": str(scenario.get("priority", "high")),
+            "is_onboarding": bool(scenario.get("is_onboarding", False)),
+            "cases": normalized_cases,
+        }
+
+    def _inject_custom_cases(self, scenario: Dict[str, Any]) -> None:
+        existing_case_ids = {case["id"] for case in self._cases}
+        for case in scenario["cases"]:
+            if case["id"] not in existing_case_ids:
+                self._cases.append(case)
+
+    def _upsert_custom_scenario(self, scenario: Dict[str, Any]) -> None:
+        case_ids = [case["id"] for case in scenario["cases"]]
+        custom_summary = {
+            "id": scenario["id"],
+            "title": scenario["title"],
+            "priority": scenario["priority"],
+            "is_onboarding": scenario["is_onboarding"],
+            "cases_count": len(scenario["cases"]),
+            "total_steps": sum(len(case.get("steps", [])) for case in scenario["cases"]),
+            "case_ids": case_ids,
+        }
+        self._scenarios = [item for item in self._scenarios if item.get("id") != scenario["id"]]
+        self._scenarios.insert(0, custom_summary)
 
     def _collect_cases_from_suite_tree(
         self,
@@ -322,6 +398,9 @@ class QaseTestParserTool(BaseTool):
         digest.update(content)
         digest.update(str(self.max_cases_per_scenario).encode("utf-8"))
         digest.update(self.target_root_suite.encode("utf-8"))
+        if self.custom_scenario_path and self.custom_scenario_path.exists():
+            digest.update(str(self.custom_scenario_path).encode("utf-8"))
+            digest.update(self.custom_scenario_path.read_bytes())
         return digest.hexdigest()
 
     def _load_cached_scenarios(self) -> List[Dict[str, Any]] | None:
