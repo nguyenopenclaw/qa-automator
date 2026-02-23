@@ -107,6 +107,7 @@ class MaestroAutomationTool(BaseTool):
             return install_failure
         if not is_onboarding:
             self._skip_onboarding_if_possible(test_id)
+        self._note_screenshots_dir().mkdir(parents=True, exist_ok=True)
         flow_path = self._write_flow(test_case)
         cmd = [self.maestro_bin]
         if self.device:
@@ -560,7 +561,14 @@ class MaestroAutomationTool(BaseTool):
     def _render_comment(self, text: str) -> str:
         digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:10]
         # Some Maestro versions do not support `comment`; use deterministic evidence capture instead.
-        return f"- takeScreenshot: \"note-{digest}\""
+        return f"- takeScreenshot: \"{self._note_screenshot_name(digest)}\""
+
+    def _note_screenshots_dir(self) -> Path:
+        return self.artifacts_dir / "test_screenshots"
+
+    def _note_screenshot_name(self, digest: str) -> str:
+        # Maestro appends .png automatically; pass path without extension.
+        return str(self._note_screenshots_dir() / f"note-{digest}")
 
     def _is_placeholder_assertion(self, text: str) -> bool:
         normalized = str(text or "").strip().lower()
