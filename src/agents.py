@@ -70,7 +70,11 @@ def automator_agent(maestro_tool, qase_parser_tool, state_tracker_tool, appflow_
         "6) Run maestro_cli only after MaestroSenior returns corrected YAML.\n"
         "7) On failure, inspect failure_context, gather AppFlow feedback, rewrite YAML, retry.\n"
         "8) After every attempt (pass/fail), persist observation via app_flow_memory.record_observation "
-        "with: test_id, scenario_id, status, attempt, location_hint, failure_cause.\n\n"
+        "with: test_id, scenario_id, status, attempt, location_hint, failure_cause, and notes. "
+        "Use maestro_cli.navigation_context as primary source: set location_hint=current_screen "
+        "(fallback from_screen), and send notes as JSON with current_screen, from_screen, "
+        "next_screen, action_hint, screen_chain, elements/ui_text_candidates, flow_id, "
+        "flow_description.\n\n"
         "Quality rules:\n"
         "- Never resend unchanged YAML after element_not_found/assertion_failed.\n"
         "- Preserve already successful flow prefix. If failure_context provides "
@@ -139,7 +143,7 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
     """Instantiate AppFlow specialist that builds screen-flow understanding."""
     return Agent(
         role="AppFlow Specialist",
-        goal="Track where scenario items start/fail and recommend best app entry points",
+        goal="Build reliable screen chain maps and recommend best app entry points",
         backstory=(
             "Navigation-focused QA analyst who maintains a persistent map of app screens "
             "and scenario entry points from previous automation attempts."
@@ -162,10 +166,15 @@ def appflow_specialist_agent(appflow_memory_tool, qase_parser_tool, screen_inspe
             "Runtime debug protocol:\n"
             "- Use `screen_inspector` only during active failure analysis and only when explicitly asked.\n"
             "- When manager/automator shares new attempt evidence, persist it via `record_observation`.\n"
+            "- Maintain explicit screen graph via `record_screen_transition`: for each observed screen, "
+            "save `current_screen`, visible `elements`, optional `next_screen`, and `action_hint`.\n"
+            "- Build scenario-level flow files by passing `flow_id`/`flow_description` so memory "
+            "can update `flow_*.json` with screen chain references.\n"
             "- If evidence includes UI tree or ui_text_candidates, return refined selectors and concrete "
             "next-screen hints (no generic advice).\n\n"
             "Response style:\n"
             "- Keep output short and actionable.\n"
-            "- Per case, include: recommended_start, confidence, rationale, and next validation step."
+            "- Per case, include: recommended_start, confidence, rationale, and next validation step.\n"
+            "- When known, include screen chain preview and key elements for each screen."
         ),
     )

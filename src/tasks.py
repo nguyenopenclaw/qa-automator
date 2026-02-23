@@ -43,15 +43,18 @@ def map_appflow_task(agent, artifacts_dir: str) -> Task:
     3) If memory has no data, infer from title/preconditions/steps and mark low-confidence.
     4) Do not call `screen_inspector` in this pre-run planning task.
 
-    Save consolidated plan to `{artifacts_dir}/appflow_plan_<scenario_id>.md`.
-    Keep it concise but complete: every case must have an explicit entry hypothesis.
-    Include scenario summary, recommended navigation order, per-case start context,
-    confidence, known flaky selector warnings, and validation gaps for the manager.
+    Persist structured AppFlow outputs:
+    - screen graph files in `{artifacts_dir}/app_flow_memory/screens/screen_*.json`
+      (elements + transitions),
+    - flow files in `{artifacts_dir}/app_flow_memory/flows/flow_*.json`
+      (screen chain references + short descriptions),
+    - consolidated scenario plan in `{artifacts_dir}/appflow_plan_<scenario_id>.json`.
+    Ensure every case has explicit entry hypothesis and is linked to known/expected screens.
     """
 
     expected_output = (
-        "Markdown plan saved to artifacts/appflow_plan_<scenario_id>.md summarizing per-case "
-        "entry points, risks, and memory-backed hints."
+        "JSON plan saved to artifacts/appflow_plan_<scenario_id>.json and updated "
+        "screen_*.json/flow_*.json graph artifacts for the selected scenario."
     )
 
     return Task(
@@ -110,10 +113,11 @@ def automate_tests_task(agent, app_path: str, artifacts_dir: str, max_attempts: 
        before maestro_cli run.
     5) On failure, inspect `failure_context` (cause, recommendation, log excerpt,
        debug_context.ui_text_candidates, failed_selector, failed_step_index,
-       last_successful_step_index, retry_from_step_index), share inline evidence with AppFlow,
+       last_successful_step_index, retry_from_step_index, navigation_context), share inline evidence with AppFlow,
        rewrite YAML from the failure point forward, and keep already validated prefix steps.
     6) After each attempt, record AppFlow observation: item id (`test_id`), scenario id, status,
-       location_hint, and failure_cause.
+       location_hint, and failure_cause. Use `navigation_context.current_screen` as location_hint
+       (fallback `from_screen`) and include full navigation JSON in notes.
 
     Quality constraints:
     - Always capture screenshot on failed runs.

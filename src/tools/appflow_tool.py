@@ -15,7 +15,10 @@ class AppFlowInput(BaseModel):
     """Supported inputs for app_flow_memory tool calls."""
 
     action: str = Field(
-        description="Action: suggest_context | record_plan | record_observation | summary"
+        description=(
+            "Action: suggest_context | record_plan | record_observation | "
+            "record_screen_transition | summary"
+        )
     )
     test_id: str | None = Field(default=None, description="Test case identifier.")
     scenario_id: str | None = Field(default=None, description="Scenario identifier.")
@@ -35,6 +38,30 @@ class AppFlowInput(BaseModel):
     confidence: str | None = Field(default=None, description="Confidence label for plan.")
     failure_cause: str | None = Field(default=None, description="Failure cause string.")
     notes: str | None = Field(default=None, description="Any extra inference notes.")
+    current_screen: str | None = Field(
+        default=None,
+        description="Current/from screen name for screen-graph update.",
+    )
+    next_screen: str | None = Field(
+        default=None,
+        description="Next/to screen name for screen-graph update.",
+    )
+    action_hint: str | None = Field(
+        default=None,
+        description="How transition happens (tap/swipe/button/deeplink).",
+    )
+    elements: List[str] | None = Field(
+        default=None,
+        description="Visible UI elements for the current screen.",
+    )
+    flow_id: str | None = Field(
+        default=None,
+        description="Optional logical flow key (e.g. onboarding, checkout).",
+    )
+    flow_description: str | None = Field(
+        default=None,
+        description="Short flow summary stored in flow_*.json.",
+    )
 
 
 class AppFlowMemoryTool(BaseTool):
@@ -54,8 +81,12 @@ class AppFlowMemoryTool(BaseTool):
     _checkpoint_dir: Path = PrivateAttr()
     _detail_dir: Path = PrivateAttr()
     _detail_catalog_path: Path = PrivateAttr()
+    _screens_dir: Path = PrivateAttr()
+    _flows_dir: Path = PrivateAttr()
+    _graph_catalog_path: Path = PrivateAttr()
     _state: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _detail_catalog: Dict[str, Any] = PrivateAttr(default_factory=dict)
+    _graph_catalog: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _case_limit: int = PrivateAttr(default=300)
     _scenario_limit: int = PrivateAttr(default=200)
     _score_decay: float = PrivateAttr(default=0.92)
@@ -73,6 +104,11 @@ class AppFlowMemoryTool(BaseTool):
         self._detail_dir = self._memory_dir / "details"
         self._detail_dir.mkdir(parents=True, exist_ok=True)
         self._detail_catalog_path = self._memory_dir / "detail_catalog.json"
+        self._screens_dir = self._memory_dir / "screens"
+        self._screens_dir.mkdir(parents=True, exist_ok=True)
+        self._flows_dir = self._memory_dir / "flows"
+        self._flows_dir.mkdir(parents=True, exist_ok=True)
+        self._graph_catalog_path = self._memory_dir / "graph_catalog.json"
         legacy_path = self.artifacts_dir / "app_flow_knowledge.json"
         if legacy_path.exists() and not self._knowledge_path.exists():
             legacy_path.replace(self._knowledge_path)
@@ -93,6 +129,7 @@ class AppFlowMemoryTool(BaseTool):
             }
         self._ensure_schema()
         self._load_detail_catalog()
+        self._load_graph_catalog()
 
     def _run(
         self,
@@ -107,6 +144,12 @@ class AppFlowMemoryTool(BaseTool):
         location_hint: str | None = None,
         failure_cause: str | None = None,
         notes: str | None = None,
+        current_screen: str | None = None,
+        next_screen: str | None = None,
+        action_hint: str | None = None,
+        elements: List[str] | None = None,
+        flow_id: str | None = None,
+        flow_description: str | None = None,
         recommended_start: str | None = None,
         confidence: str | None = None,
     ) -> Dict[str, Any]:
@@ -126,6 +169,8 @@ class AppFlowMemoryTool(BaseTool):
                 recommended_start=recommended_start or location_hint,
                 confidence=confidence,
                 notes=notes,
+                flow_id=flow_id,
+                flow_description=flow_description,
             )
         if action == "record_observation":
             return self._record_observation(
@@ -136,6 +181,20 @@ class AppFlowMemoryTool(BaseTool):
                 attempt=attempt,
                 location_hint=location_hint,
                 failure_cause=failure_cause,
+                notes=notes,
+            )
+        if action == "record_screen_transition":
+            return self._record_screen_transition(
+                test_id=test_id,
+                scenario_id=scenario_id,
+                current_screen=current_screen or location_hint,
+                next_screen=next_screen,
+                action_hint=action_hint,
+                elements=elements,
+                flow_id=flow_id,
+                flow_description=flow_description,
+                status=status,
+                attempt=attempt,
                 notes=notes,
             )
         if action == "summary":
@@ -198,6 +257,10 @@ class AppFlowMemoryTool(BaseTool):
             rationale.append("Detailed segment memory suggests this start context.")
         if detail_hints.get("top_failures"):
             rationale.append(f"Detailed failures: {', '.join(detail_hints['top_failures'][:3])}")
+        flow_hints = self._collect_flow_hints(test_id=test_id, scenario_id=scenario_id)
+        if flow_hints.get("screen_chain"):
+            chain_preview = " -> ".join(flow_hints["screen_chain"][:4])
+            rationale.append(f"Known screen chain: {chain_preview}")
 
         return {
             "test_id": test_id,
@@ -206,6 +269,7 @@ class AppFlowMemoryTool(BaseTool):
             "confidence": confidence,
             "rationale": rationale,
             "known_case_observations": len(case_entry.get("observations", [])) if case_entry else 0,
+            "flow_hints": flow_hints,
         }
 
     def _record_plan(
@@ -216,6 +280,8 @@ class AppFlowMemoryTool(BaseTool):
         recommended_start: str | None,
         confidence: str | None,
         notes: str | None,
+        flow_id: str | None,
+        flow_description: str | None,
     ) -> Dict[str, Any]:
         if not test_id:
             raise ValueError("record_plan requires test_id")
@@ -299,6 +365,27 @@ class AppFlowMemoryTool(BaseTool):
 
         self._state["updated_at"] = now
         self._write()
+        graph_event = self._extract_graph_event(
+            location_hint=recommended_start,
+            notes=notes,
+            flow_id=flow_id,
+            flow_description=flow_description,
+        )
+        if graph_event:
+            self._record_screen_transition(
+                test_id=test_id,
+                scenario_id=scenario_id,
+                current_screen=graph_event.get("current_screen") or recommended_start,
+                next_screen=graph_event.get("next_screen"),
+                action_hint=graph_event.get("action_hint"),
+                elements=graph_event.get("elements"),
+                flow_id=graph_event.get("flow_id"),
+                flow_description=graph_event.get("flow_description"),
+                status=None,
+                attempt=None,
+                notes=notes,
+                strict=False,
+            )
         return {
             "ok": True,
             "test_id": test_id,
@@ -416,6 +503,22 @@ class AppFlowMemoryTool(BaseTool):
 
         self._state["updated_at"] = now
         self._write()
+        graph_event = self._extract_graph_event(location_hint=location_hint, notes=notes)
+        if graph_event:
+            self._record_screen_transition(
+                test_id=test_id,
+                scenario_id=scenario_id,
+                current_screen=graph_event.get("current_screen") or location_hint,
+                next_screen=graph_event.get("next_screen"),
+                action_hint=graph_event.get("action_hint"),
+                elements=graph_event.get("elements"),
+                flow_id=graph_event.get("flow_id"),
+                flow_description=graph_event.get("flow_description"),
+                status=status_lower,
+                attempt=attempt,
+                notes=notes,
+                strict=False,
+            )
         return {
             "ok": True,
             "test_id": test_id,
@@ -438,6 +541,8 @@ class AppFlowMemoryTool(BaseTool):
                 }
             )
         checkpoint_files = sorted(self._checkpoint_dir.glob("*.json"))
+        screen_files = sorted(self._screens_dir.glob("screen_*.json"))
+        flow_files = sorted(self._flows_dir.glob("flow_*.json"))
         return {
             "updated_at": self._state.get("updated_at", ""),
             "known_cases": len(cases),
@@ -449,6 +554,13 @@ class AppFlowMemoryTool(BaseTool):
             "detail_catalog_path": str(self._detail_catalog_path),
             "detail_segments": len(self._detail_catalog.get("segments", {})),
             "detail_dir": str(self._detail_dir),
+            "screen_graph": {
+                "catalog_path": str(self._graph_catalog_path),
+                "screens_dir": str(self._screens_dir),
+                "flows_dir": str(self._flows_dir),
+                "screens": len(screen_files),
+                "flows": len(flow_files),
+            },
             "memory_limits": {
                 "max_cases": self._case_limit,
                 "max_scenarios": self._scenario_limit,
@@ -460,6 +572,37 @@ class AppFlowMemoryTool(BaseTool):
 
     def _case_entry(self, test_id: str) -> Dict[str, Any] | None:
         return self._state.get("cases", {}).get(test_id)
+
+    def _collect_flow_hints(self, test_id: str | None, scenario_id: str | None) -> Dict[str, Any]:
+        flow_key = self._flow_key(flow_id=None, scenario_id=scenario_id, test_id=test_id)
+        flow_id = str(self._graph_catalog.get("flows_by_key", {}).get(flow_key, ""))
+        if not flow_id:
+            return {}
+        payload = self._read_graph_file(self._flow_path(flow_id))
+        if not payload:
+            return {}
+        chain_ids = payload.get("screen_chain", [])
+        if not isinstance(chain_ids, list):
+            chain_ids = []
+        chain_names = [self._screen_name(str(item)) for item in chain_ids if str(item).strip()]
+        screen_details: List[Dict[str, Any]] = []
+        for screen_id in chain_ids[:5]:
+            screen_payload = self._read_graph_file(self._screen_path(str(screen_id)))
+            if not screen_payload:
+                continue
+            screen_details.append(
+                {
+                    "screen_id": str(screen_payload.get("screen_id") or screen_id),
+                    "name": str(screen_payload.get("name") or screen_id),
+                    "elements": list(screen_payload.get("elements", []))[:20],
+                }
+            )
+        return {
+            "flow_id": flow_id,
+            "flow_key": str(payload.get("flow_key") or flow_key),
+            "screen_chain": chain_names[:20],
+            "screens": screen_details,
+        }
 
     def _ensure_schema(self) -> None:
         self._state["version"] = max(int(self._state.get("version", 1)), 2)
@@ -579,6 +722,464 @@ class AppFlowMemoryTool(BaseTool):
         if "settings" in haystack:
             return "settings"
         return None
+
+    def _record_screen_transition(
+        self,
+        test_id: str | None,
+        scenario_id: str | None,
+        current_screen: str | None,
+        next_screen: str | None,
+        action_hint: str | None,
+        elements: List[str] | None,
+        flow_id: str | None,
+        flow_description: str | None,
+        status: str | None,
+        attempt: int | None,
+        notes: str | None,
+        strict: bool = True,
+    ) -> Dict[str, Any]:
+        if not test_id and strict:
+            raise ValueError("record_screen_transition requires test_id")
+        if not current_screen and not next_screen and not elements:
+            if strict:
+                raise ValueError("record_screen_transition requires at least current_screen or next_screen")
+            return {}
+
+        now = datetime.now(timezone.utc).isoformat()
+        source_id = self._upsert_screen(
+            screen_name=current_screen,
+            elements=elements,
+            status=status,
+            attempt=attempt,
+            seen_at=now,
+        )
+        target_id = self._upsert_screen(
+            screen_name=next_screen,
+            elements=None,
+            status=status,
+            attempt=attempt,
+            seen_at=now,
+        )
+        if source_id and target_id:
+            self._add_screen_transition(
+                from_screen_id=source_id,
+                to_screen_id=target_id,
+                via=action_hint,
+                seen_at=now,
+            )
+
+        flow_key = self._flow_key(flow_id=flow_id, scenario_id=scenario_id, test_id=test_id)
+        flow_file_id = self._upsert_flow(
+            flow_key=flow_key,
+            scenario_id=scenario_id,
+            flow_description=flow_description,
+            source_id=source_id,
+            target_id=target_id,
+            via=action_hint,
+            test_id=test_id,
+            seen_at=now,
+        )
+        self._graph_catalog["updated_at"] = now
+        self._write_graph_catalog()
+        return {
+            "ok": True,
+            "test_id": test_id or "",
+            "scenario_id": scenario_id or "",
+            "flow_id": flow_file_id,
+            "source_screen_id": source_id,
+            "target_screen_id": target_id,
+            "source_screen": current_screen or "",
+            "target_screen": next_screen or "",
+        }
+
+    def _upsert_screen(
+        self,
+        screen_name: str | None,
+        elements: List[str] | None,
+        status: str | None,
+        attempt: int | None,
+        seen_at: str,
+    ) -> str:
+        normalized_name = str(screen_name or "").strip()
+        if not normalized_name:
+            return ""
+        key = self._normalize_screen_key(normalized_name)
+        if not key:
+            return ""
+        screens_by_key = self._graph_catalog.setdefault("screens_by_key", {})
+        if key in screens_by_key:
+            screen_id = str(screens_by_key[key])
+        else:
+            next_seq = int(self._graph_catalog.get("next_screen_seq", 1) or 1)
+            screen_id = f"screen_{next_seq:03d}"
+            self._graph_catalog["next_screen_seq"] = next_seq + 1
+            screens_by_key[key] = screen_id
+
+        payload = self._read_graph_file(self._screen_path(screen_id))
+        if not payload:
+            payload = {
+                "screen_id": screen_id,
+                "name": normalized_name,
+                "aliases": [normalized_name],
+                "elements": [],
+                "transitions": [],
+                "stats": {
+                    "seen_count": 0,
+                    "passed_count": 0,
+                    "failed_count": 0,
+                    "attempt_max": 0,
+                },
+                "last_seen_at": "",
+            }
+        aliases = payload.setdefault("aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
+        if normalized_name not in aliases:
+            aliases.append(normalized_name)
+        payload["aliases"] = aliases[-20:]
+        payload["name"] = str(payload.get("name") or normalized_name)
+
+        existing_elements = payload.get("elements", [])
+        if not isinstance(existing_elements, list):
+            existing_elements = []
+        normalized_elements = self._normalize_elements(elements)
+        merged = list(existing_elements)
+        known = {str(item).strip().lower() for item in merged if str(item).strip()}
+        for item in normalized_elements:
+            low = item.lower()
+            if low in known:
+                continue
+            known.add(low)
+            merged.append(item)
+        payload["elements"] = merged[-80:]
+
+        stats = payload.get("stats", {})
+        if not isinstance(stats, dict):
+            stats = {}
+        stats["seen_count"] = int(stats.get("seen_count", 0) or 0) + 1
+        status_lower = (status or "").strip().lower()
+        if status_lower == "passed":
+            stats["passed_count"] = int(stats.get("passed_count", 0) or 0) + 1
+        elif status_lower:
+            stats["failed_count"] = int(stats.get("failed_count", 0) or 0) + 1
+        if attempt and int(attempt) > int(stats.get("attempt_max", 0) or 0):
+            stats["attempt_max"] = int(attempt)
+        payload["stats"] = stats
+        payload["last_seen_at"] = seen_at
+        self._write_graph_file(self._screen_path(screen_id), payload)
+        return screen_id
+
+    def _add_screen_transition(
+        self,
+        from_screen_id: str,
+        to_screen_id: str,
+        via: str | None,
+        seen_at: str,
+    ) -> None:
+        if not from_screen_id or not to_screen_id:
+            return
+        payload = self._read_graph_file(self._screen_path(from_screen_id))
+        if not payload:
+            return
+        transitions = payload.get("transitions", [])
+        if not isinstance(transitions, list):
+            transitions = []
+        normalized_via = str(via or "").strip() or "unknown"
+        found = False
+        for entry in transitions:
+            if not isinstance(entry, dict):
+                continue
+            if (
+                str(entry.get("to_screen_id") or "") == to_screen_id
+                and str(entry.get("via") or "") == normalized_via
+            ):
+                entry["count"] = int(entry.get("count", 0) or 0) + 1
+                entry["last_seen_at"] = seen_at
+                found = True
+                break
+        if not found:
+            transitions.append(
+                {
+                    "to_screen_id": to_screen_id,
+                    "to_screen": self._screen_name(to_screen_id),
+                    "via": normalized_via,
+                    "count": 1,
+                    "last_seen_at": seen_at,
+                }
+            )
+        payload["transitions"] = transitions[-80:]
+        payload["last_seen_at"] = seen_at
+        self._write_graph_file(self._screen_path(from_screen_id), payload)
+
+    def _upsert_flow(
+        self,
+        flow_key: str,
+        scenario_id: str | None,
+        flow_description: str | None,
+        source_id: str,
+        target_id: str,
+        via: str | None,
+        test_id: str | None,
+        seen_at: str,
+    ) -> str:
+        flows_by_key = self._graph_catalog.setdefault("flows_by_key", {})
+        if flow_key in flows_by_key:
+            flow_id = str(flows_by_key[flow_key])
+        else:
+            next_seq = int(self._graph_catalog.get("next_flow_seq", 1) or 1)
+            flow_id = f"flow_{next_seq:03d}"
+            self._graph_catalog["next_flow_seq"] = next_seq + 1
+            flows_by_key[flow_key] = flow_id
+
+        payload = self._read_graph_file(self._flow_path(flow_id))
+        if not payload:
+            payload = {
+                "flow_id": flow_id,
+                "flow_key": flow_key,
+                "scenario_id": scenario_id or "",
+                "description": "",
+                "screens": [],
+                "screen_chain": [],
+                "transitions": [],
+                "test_ids": [],
+                "last_seen_at": "",
+            }
+        if scenario_id and not payload.get("scenario_id"):
+            payload["scenario_id"] = scenario_id
+        if flow_description:
+            payload["description"] = str(flow_description).strip()
+
+        screen_chain = payload.get("screen_chain", [])
+        if not isinstance(screen_chain, list):
+            screen_chain = []
+        for candidate in [source_id, target_id]:
+            if not candidate:
+                continue
+            if not screen_chain or screen_chain[-1] != candidate:
+                screen_chain.append(candidate)
+        payload["screen_chain"] = screen_chain[-200:]
+
+        screens = payload.get("screens", [])
+        if not isinstance(screens, list):
+            screens = []
+        known_ids = {str(item.get("screen_id")) for item in screens if isinstance(item, dict)}
+        for candidate in [source_id, target_id]:
+            if not candidate or candidate in known_ids:
+                continue
+            known_ids.add(candidate)
+            screens.append({"screen_id": candidate, "name": self._screen_name(candidate)})
+        payload["screens"] = screens[-200:]
+
+        transitions = payload.get("transitions", [])
+        if not isinstance(transitions, list):
+            transitions = []
+        if source_id and target_id:
+            normalized_via = str(via or "").strip() or "unknown"
+            updated = False
+            for item in transitions:
+                if not isinstance(item, dict):
+                    continue
+                if (
+                    str(item.get("from_screen_id") or "") == source_id
+                    and str(item.get("to_screen_id") or "") == target_id
+                    and str(item.get("via") or "") == normalized_via
+                ):
+                    item["count"] = int(item.get("count", 0) or 0) + 1
+                    item["last_seen_at"] = seen_at
+                    updated = True
+                    break
+            if not updated:
+                transitions.append(
+                    {
+                        "from_screen_id": source_id,
+                        "from_screen": self._screen_name(source_id),
+                        "to_screen_id": target_id,
+                        "to_screen": self._screen_name(target_id),
+                        "via": normalized_via,
+                        "count": 1,
+                        "last_seen_at": seen_at,
+                    }
+                )
+        payload["transitions"] = transitions[-200:]
+
+        test_ids = payload.get("test_ids", [])
+        if not isinstance(test_ids, list):
+            test_ids = []
+        if test_id and test_id not in test_ids:
+            test_ids.append(test_id)
+        payload["test_ids"] = test_ids[-200:]
+        payload["last_seen_at"] = seen_at
+        self._write_graph_file(self._flow_path(flow_id), payload)
+        return flow_id
+
+    def _screen_name(self, screen_id: str) -> str:
+        payload = self._read_graph_file(self._screen_path(screen_id))
+        if not payload:
+            return screen_id
+        return str(payload.get("name") or screen_id)
+
+    def _normalize_elements(self, values: List[str] | None) -> List[str]:
+        if not isinstance(values, list):
+            return []
+        out: List[str] = []
+        seen: set[str] = set()
+        for item in values:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            low = text.lower()
+            if low in seen:
+                continue
+            seen.add(low)
+            out.append(text)
+        return out[:80]
+
+    def _extract_graph_event(
+        self,
+        location_hint: str | None,
+        notes: str | None,
+        flow_id: str | None = None,
+        flow_description: str | None = None,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "current_screen": str(location_hint or "").strip(),
+            "next_screen": "",
+            "action_hint": "",
+            "elements": [],
+            "flow_id": flow_id or "",
+            "flow_description": flow_description or "",
+        }
+        if not notes:
+            return result if result["current_screen"] else {}
+        text = str(notes).strip()
+        if not text:
+            return result if result["current_screen"] else {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return result if result["current_screen"] else {}
+        if not isinstance(parsed, dict):
+            return result if result["current_screen"] else {}
+
+        result["current_screen"] = (
+            str(
+                parsed.get("current_screen")
+                or parsed.get("from_screen")
+                or parsed.get("screen")
+                or result["current_screen"]
+            ).strip()
+        )
+        result["next_screen"] = str(
+            parsed.get("next_screen") or parsed.get("to_screen") or parsed.get("target_screen") or ""
+        ).strip()
+        result["action_hint"] = str(
+            parsed.get("action_hint") or parsed.get("via") or parsed.get("action") or ""
+        ).strip()
+        if not result["flow_id"]:
+            result["flow_id"] = str(parsed.get("flow_id") or parsed.get("flow_key") or "").strip()
+        if not result["flow_description"]:
+            result["flow_description"] = str(
+                parsed.get("flow_description") or parsed.get("description") or ""
+            ).strip()
+        navigation_context = parsed.get("navigation_context")
+        if isinstance(navigation_context, dict):
+            if not result["current_screen"]:
+                result["current_screen"] = str(
+                    navigation_context.get("current_screen")
+                    or navigation_context.get("from_screen")
+                    or ""
+                ).strip()
+            if not result["next_screen"]:
+                result["next_screen"] = str(navigation_context.get("next_screen") or "").strip()
+            if not result["action_hint"]:
+                result["action_hint"] = str(navigation_context.get("action_hint") or "").strip()
+
+        elements: List[str] = []
+        for key in ("elements", "screen_elements", "ui_text_candidates"):
+            raw = parsed.get(key)
+            if isinstance(raw, list):
+                elements.extend(str(item or "").strip() for item in raw)
+        if isinstance(navigation_context, dict):
+            nav_elements = navigation_context.get("elements")
+            if isinstance(nav_elements, list):
+                elements.extend(str(item or "").strip() for item in nav_elements)
+        debug_context = parsed.get("debug_context")
+        if isinstance(debug_context, dict):
+            candidates = debug_context.get("ui_text_candidates")
+            if isinstance(candidates, list):
+                elements.extend(str(item or "").strip() for item in candidates)
+            failed_selector = str(debug_context.get("failed_selector") or "").strip()
+            if failed_selector:
+                elements.append(f"failed_selector:{failed_selector}")
+        result["elements"] = self._normalize_elements(elements)
+        if not (result["current_screen"] or result["next_screen"] or result["elements"]):
+            return {}
+        return result
+
+    def _normalize_screen_key(self, value: str) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return ""
+        return re.sub(r"\s+", " ", raw)
+
+    def _flow_key(self, flow_id: str | None, scenario_id: str | None, test_id: str | None) -> str:
+        explicit = str(flow_id or "").strip()
+        if explicit:
+            return f"flow:{explicit}"
+        if scenario_id:
+            return f"scenario:{scenario_id}"
+        if test_id:
+            return f"case:{test_id}"
+        return "flow:unknown"
+
+    def _screen_path(self, screen_id: str) -> Path:
+        return self._screens_dir / f"{screen_id}.json"
+
+    def _flow_path(self, flow_id: str) -> Path:
+        return self._flows_dir / f"{flow_id}.json"
+
+    def _read_graph_file(self, path: Path) -> Dict[str, Any]:
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write_graph_file(self, path: Path, payload: Dict[str, Any]) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _load_graph_catalog(self) -> None:
+        self._graph_catalog = {
+            "version": 1,
+            "updated_at": "",
+            "next_screen_seq": 1,
+            "next_flow_seq": 1,
+            "screens_by_key": {},
+            "flows_by_key": {},
+        }
+        if not self._graph_catalog_path.exists():
+            return
+        try:
+            raw = json.loads(self._graph_catalog_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return
+        if not isinstance(raw, dict):
+            return
+        self._graph_catalog["updated_at"] = str(raw.get("updated_at", ""))
+        self._graph_catalog["next_screen_seq"] = int(raw.get("next_screen_seq", 1) or 1)
+        self._graph_catalog["next_flow_seq"] = int(raw.get("next_flow_seq", 1) or 1)
+        screens = raw.get("screens_by_key")
+        flows = raw.get("flows_by_key")
+        if isinstance(screens, dict):
+            self._graph_catalog["screens_by_key"] = {str(k): str(v) for k, v in screens.items()}
+        if isinstance(flows, dict):
+            self._graph_catalog["flows_by_key"] = {str(k): str(v) for k, v in flows.items()}
+
+    def _write_graph_catalog(self) -> None:
+        payload = json.dumps(self._graph_catalog, ensure_ascii=False, indent=2)
+        self._graph_catalog_path.write_text(payload, encoding="utf-8")
 
     def _load_detail_catalog(self) -> None:
         self._detail_catalog = {

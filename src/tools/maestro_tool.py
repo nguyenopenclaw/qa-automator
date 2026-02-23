@@ -277,12 +277,148 @@ class MaestroAutomationTool(BaseTool):
                     artifacts.append(target)
                 if debug_context:
                     failure_context["debug_context"] = debug_context
+            navigation_context = self._build_navigation_context(
+                flow_path=flow_path,
+                failed_step_index=failure_context.get("failed_step_index"),
+                last_successful_step_index=failure_context.get("last_successful_step_index"),
+                debug_context=failure_context.get("debug_context"),
+            )
+            failure_context["navigation_context"] = navigation_context
+            response["navigation_context"] = navigation_context
             response["failure_context"] = failure_context
             response["error"] = failure_context.get("cause")
+        else:
+            response["navigation_context"] = self._build_navigation_context(
+                flow_path=flow_path,
+                failed_step_index=None,
+                last_successful_step_index=None,
+                debug_context=None,
+            )
 
         return response
 
     # Helpers ----------------------------------------------------------
+    def _build_navigation_context(
+        self,
+        flow_path: Path,
+        failed_step_index: int | None,
+        last_successful_step_index: int | None,
+        debug_context: Dict[str, Any] | None,
+    ) -> Dict[str, Any]:
+        commands = self._parse_flow_commands(flow_path)
+        cursor = (
+            int(failed_step_index)
+            if isinstance(failed_step_index, int)
+            else int(last_successful_step_index)
+            if isinstance(last_successful_step_index, int)
+            else len(commands)
+        )
+        cursor = max(1, min(cursor, len(commands) or 1))
+
+        screen_asserts = [
+            item
+            for item in commands
+            if item.get("command") in {"assertVisible", "assertNotVisible"}
+            and str(item.get("value") or "").strip()
+            and not self._is_placeholder_assertion(str(item.get("value") or ""))
+        ]
+        screen_chain: List[str] = []
+        seen_screens: set[str] = set()
+        for item in screen_asserts:
+            value = str(item.get("value") or "").strip()
+            low = value.lower()
+            if low in seen_screens:
+                continue
+            seen_screens.add(low)
+            screen_chain.append(value)
+
+        before_cursor = [item for item in screen_asserts if int(item.get("index", 0) or 0) <= cursor]
+        after_cursor = [item for item in screen_asserts if int(item.get("index", 0) or 0) > cursor]
+        current_screen = str(before_cursor[-1].get("value")) if before_cursor else ""
+        from_screen = str(before_cursor[-2].get("value")) if len(before_cursor) >= 2 else ""
+        next_screen = str(after_cursor[0].get("value")) if after_cursor else ""
+
+        action_hint = ""
+        for item in reversed(commands):
+            idx = int(item.get("index", 0) or 0)
+            if idx > cursor:
+                continue
+            if item.get("command") in {"tapOn", "scrollUntilVisible", "runFlow"}:
+                value = str(item.get("value") or "").strip()
+                action_hint = f"{item['command']}:{value}" if value else str(item["command"])
+                break
+
+        elements: List[str] = []
+        if isinstance(debug_context, dict):
+            raw = debug_context.get("ui_text_candidates")
+            if isinstance(raw, list):
+                elements.extend(str(item or "").strip() for item in raw)
+            failed_selector = str(debug_context.get("failed_selector") or "").strip()
+            if failed_selector:
+                elements.append(f"failed_selector:{failed_selector}")
+
+        dedup_elements: List[str] = []
+        seen_elements: set[str] = set()
+        for item in elements:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            low = text.lower()
+            if low in seen_elements:
+                continue
+            seen_elements.add(low)
+            dedup_elements.append(text)
+
+        return {
+            "flow_path": str(flow_path),
+            "step_cursor": cursor,
+            "from_screen": from_screen,
+            "current_screen": current_screen,
+            "next_screen": next_screen,
+            "action_hint": action_hint,
+            "screen_chain": screen_chain[:25],
+            "elements": dedup_elements[:25],
+        }
+
+    def _parse_flow_commands(self, flow_path: Path) -> List[Dict[str, Any]]:
+        try:
+            content = flow_path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        commands: List[Dict[str, Any]] = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("- "):
+                continue
+            body = stripped[2:].strip()
+            if not body:
+                continue
+            command, has_colon, raw_value = body.partition(":")
+            cmd = command.strip()
+            if not cmd:
+                continue
+            value = self._decode_flow_scalar(raw_value) if has_colon else ""
+            commands.append(
+                {
+                    "index": len(commands) + 1,
+                    "command": cmd,
+                    "value": value,
+                }
+            )
+        return commands
+
+    def _decode_flow_scalar(self, raw_value: str) -> str:
+        value = str(raw_value or "").strip()
+        if not value:
+            return ""
+        if value.startswith('"') or value.startswith("'"):
+            try:
+                parsed = json.loads(value)
+                return str(parsed)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return value.strip("\"'")
+        return value
+
     def _ensure_app_installed(self, test_id: str, scenario_id: str | None = None) -> Dict[str, Any] | None:
         if not self.install_app_before_test:
             return None
