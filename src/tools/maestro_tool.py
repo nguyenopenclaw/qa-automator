@@ -117,6 +117,34 @@ class MaestroAutomationTool(BaseTool):
             self._skip_onboarding_if_possible(test_id)
         self._note_screenshots_dir().mkdir(parents=True, exist_ok=True)
         flow_path = self._write_flow(test_case)
+        if not self._flow_contains_assertions(flow_path):
+            log_path = self.artifacts_dir / "logs"
+            log_path.mkdir(parents=True, exist_ok=True)
+            log_file = log_path / f"{test_id}-attempt-{attempt}.log"
+            log_file.write_text(
+                (
+                    "Generated Maestro flow has no assertVisible/assertNotVisible commands.\n"
+                    "Flow is debug-only and cannot be marked as passed.\n"
+                    f"flow_path={flow_path}\n"
+                ),
+                encoding="utf-8",
+            )
+            return {
+                "test_id": test_id,
+                "status": "failed",
+                "attempt": attempt,
+                "artifacts": [str(log_file), str(flow_path)],
+                "error": "missing_assertions",
+                "failure_context": {
+                    "cause": "missing_assertions",
+                    "recommendation": (
+                        "Add explicit assertVisible/assertNotVisible checks that validate "
+                        "expected results from the testcase, then retry."
+                    ),
+                    "log_excerpt": log_file.read_text(encoding="utf-8"),
+                    "log_path": str(log_file),
+                },
+            }
         cmd = [self.maestro_bin]
         if self.device:
             cmd.extend(["--device", self.device])
@@ -706,6 +734,13 @@ class MaestroAutomationTool(BaseTool):
         if not match:
             return None
         return match.group(1)
+
+    def _flow_contains_assertions(self, flow_path: Path) -> bool:
+        try:
+            content = flow_path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return bool(re.search(r"^\s*-\s*(assertVisible|assertNotVisible):\s+", content, flags=re.MULTILINE))
 
     def _collect_debug_context(
         self,
