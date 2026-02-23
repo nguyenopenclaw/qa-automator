@@ -2,7 +2,7 @@
 name = "qa-automator"
 version = "0.1.0"
 description = "CrewAI-powered Qase → Maestro automation orchestrator"
-authors = ["TODO: FILL_ME"]
+authors = [{name = "Tien"}]
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
