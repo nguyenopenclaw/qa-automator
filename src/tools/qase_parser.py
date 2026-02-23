@@ -1,6 +1,7 @@
 """Tool for interpreting Qase-exported JSON test cases."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Dict, List
@@ -33,12 +34,18 @@ class QaseTestParserTool(BaseTool):
     _tested: List[str] = PrivateAttr(default_factory=list)
     _scenarios: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
     _scenarios_path: Path = PrivateAttr()
+    _source_hash: str = PrivateAttr(default="")
 
     def model_post_init(self, __context: Any) -> None:
+        self._scenarios_path = self.test_cases_path.parent / "scenarios.json"
+        self._source_hash = self._compute_source_hash()
         self._cases = self._load_cases()
         self._tested = self._load_tested()
+        cached = self._load_cached_scenarios()
+        if cached is not None:
+            self._scenarios = cached
+            return
         self._scenarios = self._build_scenarios()
-        self._scenarios_path = self.test_cases_path.parent / "scenarios.json"
         self._persist_scenarios()
 
     def _run(self, query: str | None = None) -> Dict[str, Any]:
@@ -67,16 +74,9 @@ class QaseTestParserTool(BaseTool):
 
         next_scenario = self._get_next_pending_scenario(pending_ids)
         compact_scenarios = [
-            {
-                "id": item["id"],
-                "title": item["title"],
-                "cases_count": item["cases_count"],
-                "total_steps": item["total_steps"],
-                "is_onboarding": item["is_onboarding"],
-                "priority": item["priority"],
-            }
+            self._scenario_summary(item, pending_ids)
             for item in self._scenarios
-            if item["pending_cases_count"] > 0
+            if self._pending_count(item, pending_ids) > 0
         ]
 
         return {
@@ -198,7 +198,6 @@ class QaseTestParserTool(BaseTool):
             for offset in range(0, len(cases), self.max_cases_per_scenario):
                 chunk = cases[offset : offset + self.max_cases_per_scenario]
                 case_ids = [item["id"] for item in chunk]
-                pending_count = len([case_id for case_id in case_ids if case_id not in self._tested])
                 title = self._scenario_title_from_chunk(chunk, scenario_index)
                 scenarios.append(
                     {
@@ -207,7 +206,6 @@ class QaseTestParserTool(BaseTool):
                         "priority": self._scenario_priority(chunk),
                         "is_onboarding": any(item.get("is_onboarding") for item in chunk),
                         "cases_count": len(chunk),
-                        "pending_cases_count": pending_count,
                         "total_steps": sum(len(item.get("steps", [])) for item in chunk),
                         "case_ids": case_ids,
                     }
@@ -238,6 +236,8 @@ class QaseTestParserTool(BaseTool):
 
     def _persist_scenarios(self) -> None:
         payload = {
+            "source_hash": self._source_hash,
+            "source_file": str(self.test_cases_path),
             "total_cases": len(self._cases),
             "tested_cases": len(self._tested),
             "scenarios_total": len(self._scenarios),
@@ -260,7 +260,7 @@ class QaseTestParserTool(BaseTool):
 
     def _get_next_pending_scenario(self, pending_ids: set[str]) -> Dict[str, Any] | None:
         for scenario in self._scenarios:
-            if scenario["pending_cases_count"] > 0:
+            if self._pending_count(scenario, pending_ids) > 0:
                 return self._expand_scenario(scenario, pending_ids)
         return None
 
@@ -273,5 +273,45 @@ class QaseTestParserTool(BaseTool):
         ]
         return {
             **scenario,
+            "pending_cases_count": self._pending_count(scenario, pending_ids),
             "cases": cases,
         }
+
+    def _scenario_summary(self, scenario: Dict[str, Any], pending_ids: set[str]) -> Dict[str, Any]:
+        return {
+            "id": scenario["id"],
+            "title": scenario["title"],
+            "cases_count": scenario["cases_count"],
+            "pending_cases_count": self._pending_count(scenario, pending_ids),
+            "total_steps": scenario["total_steps"],
+            "is_onboarding": scenario["is_onboarding"],
+            "priority": scenario["priority"],
+        }
+
+    def _pending_count(self, scenario: Dict[str, Any], pending_ids: set[str]) -> int:
+        case_ids = scenario.get("case_ids", [])
+        return sum(1 for case_id in case_ids if case_id in pending_ids)
+
+    def _compute_source_hash(self) -> str:
+        content = self.test_cases_path.read_bytes()
+        digest = hashlib.sha256()
+        digest.update(content)
+        digest.update(str(self.max_cases_per_scenario).encode("utf-8"))
+        digest.update(self.target_root_suite.encode("utf-8"))
+        return digest.hexdigest()
+
+    def _load_cached_scenarios(self) -> List[Dict[str, Any]] | None:
+        if not self._scenarios_path.exists():
+            return None
+        try:
+            payload = json.loads(self._scenarios_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("source_hash") != self._source_hash:
+            return None
+        scenarios = payload.get("scenarios")
+        if not isinstance(scenarios, list):
+            return None
+        return [item for item in scenarios if isinstance(item, dict)]

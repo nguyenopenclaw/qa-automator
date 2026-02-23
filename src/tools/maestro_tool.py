@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -36,12 +39,36 @@ class MaestroAutomationTool(BaseTool):
     device: str | None = None
     skip_onboarding_deeplink: str | None = None
     command_timeout_seconds: int = 120
+    screenshot_max_side_px: int = 1440
 
     def _run(
         self,
         payload: str = "{}",
     ) -> Dict[str, Any]:
-        resolved_payload: Dict[str, Any] = json.loads(payload) if payload else {}
+        try:
+            resolved_payload: Dict[str, Any] = json.loads(payload) if payload else {}
+        except json.JSONDecodeError as exc:
+            # Agent occasionally emits malformed JSON payload strings.
+            # Return a structured failure with a log path instead of crashing the tool.
+            log_dir = self.artifacts_dir / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            log_file = log_dir / f"payload-parse-error-{ts}.log"
+            log_file.write_text(
+                (
+                    "Failed to parse maestro_cli payload as JSON.\n"
+                    f"error: {exc}\n"
+                    f"payload: {payload}\n"
+                ),
+                encoding="utf-8",
+            )
+            return {
+                "test_id": "unknown",
+                "status": "failed",
+                "attempt": 1,
+                "error": f"invalid_payload_json: {exc}",
+                "artifacts": [str(log_file)],
+            }
         test_case = resolved_payload.get("test_case", {})
         attempt = int(resolved_payload.get("attempt", 1))
         screenshot = bool(resolved_payload.get("screenshot", False))
@@ -155,9 +182,34 @@ class MaestroAutomationTool(BaseTool):
                 capture_output=True,
                 timeout=self.command_timeout_seconds,
             )
+            self._shrink_screenshot_for_model(shot_path)
             return str(shot_path)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             return None
+
+    def _shrink_screenshot_for_model(self, shot_path: Path) -> None:
+        """Reduce image dimensions before it is attached to model context."""
+        try:
+            max_side = int(os.getenv("MAESTRO_SCREENSHOT_MAX_SIDE_PX", self.screenshot_max_side_px))
+        except ValueError:
+            max_side = self.screenshot_max_side_px
+        if max_side <= 0:
+            return
+
+        sips_bin = shutil.which("sips")
+        if not sips_bin:
+            return
+
+        try:
+            subprocess.run(
+                [sips_bin, "-Z", str(max_side), str(shot_path)],
+                check=True,
+                capture_output=True,
+                timeout=20,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            # Best-effort optimization: keep original screenshot if resize failed.
+            return
 
     def _skip_onboarding_if_possible(self, test_id: str) -> None:
         if not self.skip_onboarding_deeplink:
